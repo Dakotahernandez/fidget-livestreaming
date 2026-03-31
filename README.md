@@ -1,3 +1,33 @@
+# StreamForge
+
+> One-to-many live streaming platform with multi-server CDN delivery
+
+## Tech Stack
+
+- **Frontend:** React (Vite)
+- **Backend:** Rust / Axum
+- **Database:** PostgreSQL
+- **Media:** Nginx-RTMP, FFmpeg, HLS
+- **Infrastructure:** Docker, Docker Compose
+
+## Setup
+
+```bash
+cp .env.example .env
+docker-compose up --build
+```
+
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:3000 |
+| Backend API | http://localhost:8080 |
+| Media Server (RTMP) | rtmp://localhost:1935 |
+| Media Server (HLS) | http://localhost:8088 |
+| Edge Server | http://localhost:8090 |
+| Router | http://localhost:8070 |
+
+---
+
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/mun0VlAh)
 Goal: Apply the knowledge you've learned in new ways.
 
