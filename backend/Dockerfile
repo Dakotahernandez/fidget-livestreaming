@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/streamforge-backend .
+COPY --from=builder /app/target/release/fidget-backend .
 
 EXPOSE 8080
-CMD ["./streamforge-backend"]
+CMD ["./fidget-backend"]

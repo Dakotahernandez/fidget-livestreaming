@@ -7,7 +7,7 @@ import { BrowserRouter } from 'react-router-dom';
 function App() {
   return (
     <BrowserRouter>
-      <h1>StreamForge</h1>
+      <h1>Fidget</h1>
       {/* TODO: add <Routes> here */}
     </BrowserRouter>
   );

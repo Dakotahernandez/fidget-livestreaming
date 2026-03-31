@@ -1,5 +1,5 @@
 networks:
-  streamforge-net:
+  fidget-net:
     driver: bridge
 
 volumes:
@@ -11,7 +11,7 @@ services:
     image: postgres:16-alpine
     env_file: .env
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U streamforge"]
+      test: ["CMD-SHELL", "pg_isready -U fidget"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -21,7 +21,7 @@ services:
     ports:
       - "5432:5432"
     networks:
-      - streamforge-net
+      - fidget-net
 
   backend:
     build: ./backend
@@ -32,7 +32,7 @@ services:
     ports:
       - "8080:8080"
     networks:
-      - streamforge-net
+      - fidget-net
 
   frontend:
     build: ./frontend
@@ -41,7 +41,7 @@ services:
     depends_on:
       - backend
     networks:
-      - streamforge-net
+      - fidget-net
 
   media-server:
     build: ./media-server
@@ -51,7 +51,7 @@ services:
     volumes:
       - hls_segments:/tmp/hls
     networks:
-      - streamforge-net
+      - fidget-net
 
   edge:
     build: ./edge
@@ -62,7 +62,7 @@ services:
     depends_on:
       - media-server
     networks:
-      - streamforge-net
+      - fidget-net
 
   router:
     build: ./router
@@ -71,4 +71,4 @@ services:
     depends_on:
       - backend
     networks:
-      - streamforge-net
+      - fidget-net

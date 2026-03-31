@@ -1,5 +1,5 @@
 [package]
-name = "streamforge-router"
+name = "fidget-router"
 version = "0.1.0"
 edition = "2021"
 

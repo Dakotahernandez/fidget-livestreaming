@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/streamforge-router .
+COPY --from=builder /app/target/release/fidget-router .
 
 EXPOSE 8070
-CMD ["./streamforge-router"]
+CMD ["./fidget-router"]

@@ -1,4 +1,4 @@
-# StreamForge <- WORK IN PROGRESS NAME
+# Fidget
 
 > One-to-many live streaming platform with multi-server CDN delivery
 
