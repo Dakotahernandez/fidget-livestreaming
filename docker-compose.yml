@@ -1,0 +1,74 @@
+networks:
+  streamforge-net:
+    driver: bridge
+
+volumes:
+  pg_data:
+  hls_segments:
+
+services:
+  db:
+    image: postgres:16-alpine
+    env_file: .env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streamforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./migrations/:/docker-entrypoint-initdb.d/
+    ports:
+      - "5432:5432"
+    networks:
+      - streamforge-net
+
+  backend:
+    build: ./backend
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - streamforge-net
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - streamforge-net
+
+  media-server:
+    build: ./media-server
+    ports:
+      - "1935:1935"
+      - "8088:8088"
+    volumes:
+      - hls_segments:/tmp/hls
+    networks:
+      - streamforge-net
+
+  edge:
+    build: ./edge
+    ports:
+      - "8090:8090"
+    volumes:
+      - hls_segments:/tmp/hls:ro
+    depends_on:
+      - media-server
+    networks:
+      - streamforge-net
+
+  router:
+    build: ./router
+    ports:
+      - "8070:8070"
+    depends_on:
+      - backend
+    networks:
+      - streamforge-net
