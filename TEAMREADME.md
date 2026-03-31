@@ -1,4 +1,4 @@
-# StreamForge
+# StreamForge <- WORK IN PROGRESS NAME
 
 > One-to-many live streaming platform with multi-server CDN delivery
 
