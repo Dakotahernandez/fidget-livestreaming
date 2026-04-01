@@ -29,20 +29,20 @@
 
 ## Sprint Overview
 
-| Sprint | Dates              | Theme                                        |
-|--------|--------------------|----------------------------------------------|
-| 1      | Mar 31 – Apr 6     | Backend Core & Auth                          |
-| 2      | Apr 7 – Apr 13     | Stream Management, Media Pipeline & Cloud Setup |
-| 3      | Apr 14 – Apr 20    | Frontend, Viewer Experience & Cloud Deploy   |
-| 4      | Apr 21 – Apr 27    | CDN Routing, Edge Delivery & Multi-Location  |
-| 5      | Apr 28 – May 4     | Testing, Monitoring & Polish                 |
-| 6      | May 5 – May 9      | Presentation, Docs & Final Fixes             |
+| Sprint | Dates              | Theme                                           |
+|--------|--------------------|------------------------------------------------|
+| 1      | Mar 31 -- Apr 6    | Backend + Frontend Basics (get it out of the way) |
+| 2      | Apr 7 -- Apr 13    | RTMP-to-HLS Pipeline & Stream Key Auth          |
+| 3      | Apr 14 -- Apr 20   | Edge Caching & CDN Router Logic                  |
+| 4      | Apr 21 -- Apr 27   | Cloud Deploy, Multi-Location Testing & Milestone |
+| 5      | Apr 28 -- May 4    | Monitoring, Load Testing & Networking Polish     |
+| 6      | May 5 -- May 9     | Presentation, Docs & Final Fixes                 |
 
 ---
 
-## Sprint 1 — Backend Core & Auth (Mar 31 – Apr 6)
+## Sprint 1 -- Backend + Frontend Basics (Mar 31 -- Apr 6)
 
-**Goal:** A running backend that connects to Postgres, handles user registration/login with JWT, and has proper error handling.
+**Goal:** Get ALL the boilerplate out of the way fast. Working backend with auth, stream CRUD, and a functional frontend. None of this is the graded networking work -- just the scaffolding to support it.
 
 ### Tasks
 
@@ -59,176 +59,184 @@
   - Structs: `User`, `CreateUser`, `LoginUser`
   - DB queries: `create_user()`, `find_by_username()`, `find_by_id()`
 - [ ] **Auth routes** (`backend/src/routes/auth.rs`)
-  - `POST /api/auth/register` — hash password with bcrypt, insert user, return JWT
-  - `POST /api/auth/login` — verify password, return JWT
+  - `POST /api/auth/register` -- hash password with bcrypt, insert user, return JWT
+  - `POST /api/auth/login` -- verify password, return JWT
 - [ ] **JWT middleware** (`backend/src/middleware/auth.rs`)
   - Extract and validate JWT from `Authorization: Bearer <token>`
   - Inject authenticated `UserId` into request extensions
-- [ ] **Wire it all up in `main.rs`**
-  - Initialize config, DB pool, tracing
-  - Mount auth routes
-  - Add CORS middleware via `tower-http`
-- [ ] **Verify with manual testing**
-  - Register a user via curl/Postman
-  - Login and get a token
-  - Access a protected endpoint
-
-### Definition of Done
-- `docker-compose up --build` succeeds
-- Can register, login, and receive a valid JWT
-- Protected routes reject unauthenticated requests
-
----
-
-## Sprint 2 — Stream Management, Media Pipeline & Cloud Setup (Apr 7 – Apr 13)
-
-**Goal:** Streamers can create streams, get stream keys, and push RTMP video that gets validated and converted to HLS. Cloud infrastructure is provisioned and ready.
-
-### Tasks
-
 - [ ] **Stream model** (`backend/src/models/stream.rs`)
   - Structs: `Stream`, `CreateStream`
   - DB queries: `create_stream()`, `list_live_streams()`, `find_by_stream_key()`, `set_live()`, `set_offline()`
 - [ ] **Stream routes** (`backend/src/routes/streams.rs`)
-  - `POST /api/streams` — create a new stream (auth required), generate unique stream key
-  - `GET /api/streams` — list all live streams
-  - `GET /api/streams/:id` — get stream details
-  - `PUT /api/streams/:id/start` — mark stream as live
-  - `PUT /api/streams/:id/stop` — mark stream as offline
+  - `POST /api/streams` -- create a new stream (auth required), generate unique stream key
+  - `GET /api/streams` -- list all live streams
+  - `GET /api/streams/:id` -- get stream details
+  - `PUT /api/streams/:id/start` -- mark stream as live
+  - `PUT /api/streams/:id/stop` -- mark stream as offline
+- [ ] **Wire it all up in `main.rs`**
+  - Initialize config, DB pool, tracing
+  - Mount auth + stream routes
+  - Add CORS middleware via `tower-http`
+- [ ] **Frontend -- all pages** (keep it simple, functional only)
+  - API service layer (`frontend/src/services/api.js`) -- auth + stream methods, JWT interceptor
+  - `useAuth` hook (`frontend/src/hooks/`)
+  - Registration page -- form, calls API
+  - Login page -- form, stores JWT
+  - Home page -- lists live streams
+  - Dashboard -- shows stream key, OBS instructions
+  - Watch page -- HLS player with `hls.js`
+  - App routing (`frontend/src/App.jsx`) -- wire up routes + nav bar
+  - Minimal styling -- clean and functional, don't overthink it
+- [ ] **Verify end-to-end locally**
+  - `docker-compose up --build` succeeds
+  - Register, login, create stream all work
+  - Frontend pages render and connect to API
+
+### Definition of Done
+- `docker-compose up --build` runs clean
+- Full user flow works: register, login, dashboard, create stream
+- Backend auth + stream CRUD verified with curl
+- Frontend is functional (not pretty -- just working)
+
+---
+
+## Sprint 2 -- RTMP-to-HLS Pipeline & Stream Key Auth (Apr 7 -- Apr 13)
+
+**Goal:** The core networking feature: push RTMP video, validate the stream key against the backend, transcode to HLS, and serve it to viewers. This is where the real project starts.
+
+### Tasks
+
 - [ ] **Stream key validation** (`media-server/scripts/on_publish.sh`)
   - On RTMP publish, call backend API to validate the stream key
-  - Accept/reject the connection based on response
+  - Accept/reject the RTMP connection based on response
   - Mark stream as live on successful publish
+  - Mark stream as offline on `on_publish_done`
 - [ ] **Media server `on_publish` integration** (`media-server/nginx.conf`)
-  - Enable `on_publish` callback to the validation script
-  - Enable `on_publish_done` to mark stream offline
-- [ ] **Verify end-to-end RTMP → HLS**
+  - Enable `on_publish` callback pointing to the validation script
+  - Enable `on_publish_done` callback for cleanup
+  - Tune HLS settings: segment length, playlist depth, fragment naming
+- [ ] **Verify end-to-end RTMP -> HLS locally**
   - Push a test stream with FFmpeg using a valid stream key
   - Confirm HLS segments appear at `http://localhost:8088/hls/<key>/index.m3u8`
-  - Confirm invalid keys are rejected
-- [ ] **Cloud provider setup** — *Start early — this is the hardest part*
-  - Pick provider (see Cloud Provider Recommendations below)
+  - Confirm invalid keys are rejected at the RTMP level
+  - Watch the stream in the frontend Watch page
+- [ ] **HLS playback tuning**
+  - Test latency from RTMP push to HLS playback
+  - Adjust segment duration and playlist size for acceptable latency
+  - Document observed latency numbers
+- [ ] **Cloud provider setup** -- *Start early, this is the hardest part*
+  - Pick provider (Oracle Cloud Free Tier or DigitalOcean)
   - Create account, claim student credits
   - Provision a VM / instance (Ubuntu, 2+ vCPU, 4+ GB RAM)
   - Install Docker & Docker Compose on the VM
   - Open firewall ports: 22 (SSH), 80, 443, 1935 (RTMP), 3000, 8080, 8088
-  - Verify `docker-compose up` runs on the remote VM with the current codebase
+  - Verify `docker-compose up` runs on the remote VM
 
 ### Definition of Done
-- Stream CRUD endpoints work behind auth
 - RTMP push with valid stream key produces HLS segments
 - Invalid stream keys are rejected at the RTMP level
+- HLS stream watchable in browser with measured latency
 - Cloud VM is provisioned with Docker running and ports open
 
 ---
 
-## Sprint 3 — Frontend, Viewer Experience & Cloud Deploy (Apr 14 – Apr 20)
+## Sprint 3 -- Edge Caching & CDN Router Logic (Apr 14 -- Apr 20)
 
-**Goal:** Users can register, log in, browse live streams, and watch them via HLS in the browser. The platform is live on the cloud.
-
-### Tasks
-
-- [ ] **API service layer** (`frontend/src/services/api.js`)
-  - Auth methods: `register()`, `login()`, `getProfile()`
-  - Stream methods: `listStreams()`, `getStream()`, `createStream()`
-  - JWT token storage/attachment (localStorage + Axios interceptor)
-- [ ] **Auth state management** (`frontend/src/hooks/`)
-  - `useAuth` hook — login, logout, token state, current user
-- [ ] **Registration page** (`frontend/src/pages/Register.jsx`)
-  - Form with username, email, password fields
-  - Call register API, redirect to login on success
-- [ ] **Login page** (`frontend/src/pages/Login.jsx`)
-  - Form with username, password fields
-  - Store JWT, redirect to dashboard on success
-- [ ] **Home page** (`frontend/src/pages/Home.jsx`)
-  - Fetch and display list of live streams
-  - Each stream links to its watch page
-- [ ] **Dashboard page** (`frontend/src/pages/Dashboard.jsx`)
-  - Show user's stream key (create stream if none exists)
-  - Display streaming instructions (OBS/FFmpeg)
-  - Start/stop stream controls
-- [ ] **Watch page** (`frontend/src/pages/Watch.jsx`)
-  - HLS video player (use `hls.js` library)
-  - Display stream title, streamer name
-  - Auto-connect to the HLS endpoint
-- [ ] **App routing** (`frontend/src/App.jsx`)
-  - Wire up React Router routes for all pages
-  - Add navigation bar with auth-aware links
-- [ ] **Basic styling** (`frontend/src/styles/`)
-  - Clean, functional CSS for all pages
-- [ ] **Deploy to cloud** — *Don't delay — deploy what you have*
-  - Push Docker images to cloud VM (or use `git clone` + build on VM)
-  - Update `.env` with production values (public IP, DB creds)
-  - Run `docker-compose up -d` on cloud VM
-  - Verify all services accessible from public IP
-  - Set up a basic deploy script or CI pipeline
-
-### Definition of Done
-- Full user flow works: register → login → dashboard → start stream → watch
-- Viewers can watch live HLS streams in the browser
-- Navigation between pages works cleanly
-- Platform accessible from a public cloud URL
-
----
-
-## Sprint 4 — CDN Routing, Edge Delivery & Multi-Location Testing (Apr 21 – Apr 27)
-
-**Goal:** Edge server proxies/caches HLS content, router directs viewers to the best edge, and multi-location testing validates the CDN architecture.
+**Goal:** Build the CDN layer: edge servers that cache and serve HLS content, and a router that directs viewers to the best edge. This is the second core networking feature.
 
 ### Tasks
 
 - [ ] **Edge server HLS delivery** (`edge/nginx.conf`)
-  - Proxy-pass HLS requests to the media server
-  - Enable `proxy_cache` for HLS segments (.ts) and playlists (.m3u8)
+  - Proxy-pass HLS requests to the origin media server
+  - Enable `proxy_cache` for HLS segments (.ts files)
+  - Configure cache for playlists (.m3u8) with short TTL (segments change frequently)
   - Add proper CORS headers for cross-origin HLS playback
+  - Expose cache hit/miss status via response headers (for debugging/metrics)
+- [ ] **Test edge caching locally**
+  - Push a stream, pull HLS from edge instead of origin
+  - Verify cache HIT vs MISS in response headers
+  - Measure latency improvement from cached segments
 - [ ] **Router logic** (`router/src/main.rs`)
-  - `GET /api/route/:stream_key` — return the best edge URL for a viewer
-  - Health check polling of edge servers
-  - Basic selection strategy (round-robin or latency-based)
+  - `GET /api/route/:stream_key` -- return the best edge URL for a viewer
+  - Health check polling of edge servers (periodic HTTP checks)
+  - Basic selection strategy (round-robin or least-connections)
   - Track active viewer counts per edge
+  - Return degraded response if no healthy edges (fallback to origin)
 - [ ] **Frontend integration with router**
   - Watch page queries router for the best edge URL before connecting
   - Fallback to media-server direct if router/edge unavailable
-- [ ] **Deploy CDN layer to cloud**
-  - Deploy edge server(s) on cloud (ideally in a second region/VM)
-  - Update router config with cloud edge URLs
-  - Verify edge caching works in production
-- [ ] **Multi-location testing**
-  - Test with VPN from different geographic locations
-  - Verify edge caching reduces origin load
-  - Document latency/performance observations
-  - Collect data for presentation (screenshots, latency numbers)
-- [ ] **Milestone check-in prep**
-  - Prepare brief status summary for Dr. Freeman meeting
-  - Have a working demo ready to show
+- [ ] **Deploy full stack to cloud**
+  - Push code to cloud VM, run `docker-compose up -d`
+  - Update `.env` with production values (public IP, DB creds)
+  - Verify all services accessible from public IP
+  - Test RTMP push to cloud + HLS playback from cloud
 
 ### Definition of Done
-- Edge server caches and serves HLS segments
+- Edge server caches HLS segments, measurable cache hits
 - Router health-checks edges and directs viewers
-- CDN layer deployed to cloud
-- VPN-based multi-location test completed with documented results
+- Frontend uses router to pick edge server
+- Full stack running on cloud with public access
+
+---
+
+## Sprint 4 -- Cloud CDN Deploy, Multi-Location Testing & Milestone (Apr 21 -- Apr 27)
+
+**Goal:** Deploy edge servers to multiple cloud locations, test with VPN from different regions, collect performance data. Prepare for Dr. Freeman milestone check-in.
+
+### Tasks
+
+- [ ] **Multi-edge cloud deployment**
+  - Deploy edge server(s) in a second cloud region or separate VM
+  - Register both edges with the router
+  - Verify router distributes viewers across edges
+- [ ] **Multi-location VPN testing**
+  - Test from 3+ VPN locations (e.g., US East, US West, Europe)
+  - Measure and record: time-to-first-byte, segment download latency, buffering events
+  - Compare direct-from-origin vs. through-edge performance
+  - Screenshot/record results for presentation
+- [ ] **Edge cache performance analysis**
+  - Verify edge caching reduces load on origin server
+  - Measure cache hit ratios under concurrent viewers
+  - Test cache behavior during stream start/stop transitions
+- [ ] **Network resilience testing**
+  - Simulate edge server failure, verify router removes it from rotation
+  - Test viewer failover to alternate edge or origin
+  - Document failover behavior and timing
+- [ ] **Milestone check-in prep**
+  - Prepare brief status summary for Dr. Freeman meeting
+  - Have a working cloud demo ready to show
+  - Prepare talking points on architecture decisions
+
+### Definition of Done
+- Edge servers running in 2+ cloud locations
+- VPN multi-location test completed with documented latency data
+- Router failover tested and documented
 - Milestone check-in with Dr. Freeman completed
 
 ---
 
-## Sprint 5 — Testing, Monitoring & Polish (Apr 28 – May 4)
+## Sprint 5 -- Monitoring, Load Testing & Networking Polish (Apr 28 -- May 4)
 
-**Goal:** The platform is stable, monitored, tested, and documented.
+**Goal:** Add observability to the networking layer, stress-test under load, and polish the CDN behavior. This is where you prove the system works.
 
 ### Tasks
 
-- [ ] **Backend integration tests**
-  - Auth flow tests (register, login, invalid credentials)
-  - Stream CRUD tests
-  - Stream key validation tests
+- [ ] **Prometheus monitoring** (`monitoring/prometheus.yml`)
+  - Add scrape targets for backend, router, edge
+  - Expose `/metrics` endpoint on backend and router (request count, latency histograms)
+  - Track edge cache hit ratio, active connections, bytes served
+- [ ] **Grafana dashboard** (`monitoring/grafana/dashboards/streaming.json`)
+  - Panels: active streams, viewer count per edge, cache hit ratio, request latency
+  - Panel: origin vs. edge traffic comparison
 - [ ] **Viewer simulation** (`scripts/simulate_viewers.sh`)
   - Script to simulate N concurrent viewers pulling HLS segments
   - Collect metrics on latency, errors, throughput
-- [ ] **Prometheus monitoring** (`monitoring/prometheus.yml`)
-  - Add scrape targets for backend, router, edge
-  - Expose `/metrics` endpoint on backend and router
-- [ ] **Grafana dashboard** (`monitoring/grafana/dashboards/streaming.json`)
-  - Panels: active streams, viewer count, edge cache hit ratio, latency
+  - Test with 10, 50, 100 simulated viewers
+  - Document how the system scales
+- [ ] **Networking polish**
+  - Tune RTMP/HLS segment duration for optimal latency vs. reliability
+  - Tune edge cache TTLs based on observed behavior
+  - Optimize router health-check intervals
 - [ ] **Error handling audit**
   - Remove any remaining `unwrap()` calls in production code
   - Ensure all errors propagate cleanly with `?`
@@ -240,16 +248,17 @@
 - [ ] **Documentation**
   - Fill in `docs/architecture.md` with system design, data flow diagrams
   - Fill in `docs/testing.md` with test plan and results
+  - Document networking decisions: why HLS, why this cache strategy, why this routing algorithm
 
 ### Definition of Done
-- All tests pass
-- No clippy warnings
-- Monitoring dashboards show real data
-- Documentation is complete and accurate
+- Monitoring dashboards show real data from cloud deployment
+- Load testing results documented (latency at N viewers)
+- No clippy warnings, no `unwrap()` in production code
+- Architecture and testing docs complete
 
 ---
 
-## Sprint 6 — Presentation, Docs & Final Fixes (May 5 – May 9)
+## Sprint 6 -- Presentation, Docs & Final Fixes (May 5 -- May 9)
 
 **Goal:** Ship it. Present it. Be proud of it.
 
@@ -261,17 +270,18 @@
 - [ ] **README answers**
   - Answer all required submission questions in the README
   - Document AI tool usage
-- [ ] **Presentation slides**
+- [ ] **Presentation slides** (focus on networking)
   - Problem introduction: why live streaming + CDN?
   - Architecture overview with diagrams
-  - Technical deep dives (RTMP→HLS pipeline, JWT auth, CDN routing)
+  - Technical deep dives: RTMP->HLS pipeline, stream key validation, CDN routing, edge caching
+  - Performance data: latency numbers, cache hit ratios, multi-location results
   - Demo (live or pre-recorded screen capture)
   - Challenges faced
   - What we learned
   - Next steps
 - [ ] **Demo recording** (backup)
   - Record a screen capture of the full user flow as backup
-  - Include: register, login, start stream, watch from multiple "locations"
+  - Include: push RTMP stream, watch from edge, VPN multi-location, monitoring dashboards
 - [ ] **Rehearse presentation**
   - Practice ~12 minutes, ensure each team member speaks
   - Time the demo portion
@@ -292,10 +302,11 @@
 | Risk                                    | Likelihood | Impact | Mitigation                                          |
 |-----------------------------------------|------------|--------|------------------------------------------------------|
 | RTMP/HLS pipeline issues                | Medium     | High   | Test early in Sprint 2; have FFmpeg fallback ready    |
-| Cloud deployment problems               | Medium     | High   | Start cloud research in Sprint 3; use Docker images   |
+| Cloud deployment problems               | Medium     | High   | Start cloud setup in Sprint 2; use Docker images      |
+| Edge caching not working as expected    | Medium     | High   | Test with simple static files first; fallback to direct|
+| Router failover edge cases              | Medium     | Medium | Test failure scenarios explicitly in Sprint 4         |
 | Team member availability conflicts      | Low        | Medium | Plan buffer in Sprint 5; track blockers in standups   |
-| Scope creep on frontend polish          | Medium     | Low    | Keep UI functional, not fancy; prioritize core flow   |
-| Edge caching not working as expected    | Medium     | Medium | Test with simple static files first; fallback to direct|
+| Scope creep on frontend polish          | Medium     | Low    | Frontend done in Sprint 1; don't touch it again       |
 
 ---
 
