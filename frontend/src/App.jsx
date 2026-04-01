@@ -1,14 +1,62 @@
 import React from 'react';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
+import { AuthProvider } from './hooks/useAuth';
+import useAuth from './hooks/useAuth';
 
-// TODO: import pages
-// TODO: define routes with <Routes> and <Route>
+import Home from './pages/Home';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Dashboard from './pages/Dashboard';
+import Watch from './pages/Watch';
+
+/** Top-level nav bar — adapts based on auth state. */
+function Navbar() {
+  const { isAuthenticated, user, logout } = useAuth();
+
+  return (
+    <nav className="navbar">
+      <Link to="/" className="navbar__brand">
+        <img
+          src="/fidget-icon.svg"
+          alt="Fidget"
+          className="navbar__brand-icon"
+        />
+        <span className="navbar__brand-text">FIDGET</span>
+      </Link>
+      <div className="navbar__links">
+        <Link to="/">Home</Link>
+        {isAuthenticated ? (
+          <>
+            <Link to="/dashboard">Dashboard</Link>
+            <span style={{ color: 'var(--color-text-secondary)', fontSize: '0.85rem' }}>
+              {user?.username}
+            </span>
+            <button type="button" onClick={logout}>Log Out</button>
+          </>
+        ) : (
+          <>
+            <Link to="/login">Log In</Link>
+            <Link to="/register">Register</Link>
+          </>
+        )}
+      </div>
+    </nav>
+  );
+}
 
 function App() {
   return (
     <BrowserRouter>
-      <h1>Fidget</h1>
-      {/* TODO: add <Routes> here */}
+      <AuthProvider>
+        <Navbar />
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/watch/:id" element={<Watch />} />
+        </Routes>
+      </AuthProvider>
     </BrowserRouter>
   );
 }

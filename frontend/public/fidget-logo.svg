@@ -1,0 +1,36 @@
+<svg width="360" height="90" viewBox="0 0 360 90" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="spinGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#C6F135"/>
+      <stop offset="100%" stop-color="#39FF14"/>
+    </linearGradient>
+    <linearGradient id="wordGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e8ffcc"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Spinner graphic -->
+  <g transform="translate(45,45)" filter="url(#glow)">
+    <rect x="-5" y="-32" width="10" height="24" rx="5" fill="url(#spinGrad)" transform="rotate(-8)"/>
+    <rect x="-5" y="-32" width="10" height="24" rx="5" fill="url(#spinGrad)" opacity="0.78" transform="rotate(112)"/>
+    <rect x="-5" y="-32" width="10" height="24" rx="5" fill="url(#spinGrad)" opacity="0.58" transform="rotate(232)"/>
+    <circle cx="0" cy="0" r="8" fill="#0d0d0d"/>
+    <circle cx="0" cy="0" r="5" fill="url(#spinGrad)"/>
+    <circle cx="0" cy="0" r="2" fill="#0d0d0d"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text
+    x="90" y="58"
+    font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+    font-size="44"
+    font-weight="200"
+    letter-spacing="10"
+    fill="url(#wordGrad)"
+  >FIDGET</text>
+</svg>

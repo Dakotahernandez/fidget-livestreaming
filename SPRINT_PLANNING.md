@@ -1,21 +1,22 @@
 # Fidget — Sprint Planning
 
-> **Deadline:** May 9, 2026  
+> **Deadline:** May 9, 2026 
 > **Start Date:** March 31, 2026  
 > **Duration:** ~5.5 weeks (6 sprints, ~6 days each)  
 > **Project:** One-to-many live streaming platform with multi-server CDN delivery
 
 ---
 
-## Current State (March 31)
+## Current State (April 1)
 
 | Component              | Status          |
-|------------------------|-----------------|
+|------------------------|------------------|
 | Docker / Infra         | Done             |
 | Database Schema        | Done             |
 | Backend Server Boot    | Skeleton only    |
 | Backend Business Logic | All stubs        |
-| Frontend Pages         | All stubs        |
+| Frontend Pages         | **Done** (Sprint 1) |
+| Frontend Theme / Branding | **Done** (green theme + logo) |
 | Media Server (RTMP/HLS)| Config works, no auth |
 | Edge Server            | Placeholder      |
 | Router (CDN logic)     | Stub             |
@@ -77,16 +78,16 @@
   - Initialize config, DB pool, tracing
   - Mount auth + stream routes
   - Add CORS middleware via `tower-http`
-- [ ] **Frontend -- all pages** (keep it simple, functional only)
+- [x] **Frontend -- all pages** (keep it simple, functional only)
   - API service layer (`frontend/src/services/api.js`) -- auth + stream methods, JWT interceptor
-  - `useAuth` hook (`frontend/src/hooks/`)
+  - `useAuth` hook (`frontend/src/hooks/useAuth.jsx`)
   - Registration page -- form, calls API
   - Login page -- form, stores JWT
   - Home page -- lists live streams
   - Dashboard -- shows stream key, OBS instructions
-  - Watch page -- HLS player with `hls.js`
-  - App routing (`frontend/src/App.jsx`) -- wire up routes + nav bar
-  - Minimal styling -- clean and functional, don't overthink it
+  - Watch page -- HLS player with `hls.js` (black-box until Sprint 2 media pipeline)
+  - App routing (`frontend/src/App.jsx`) -- routes + nav bar with logo
+  - Void theme applied -- `#0d0d0d` bg, `#C6F135` lime brand, fidget spinner icon/logo, glow effects
 - [ ] **Verify end-to-end locally**
   - `docker-compose up --build` succeeds
   - Register, login, create stream all work

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Fidget Spinner — Web Component</title>
+  <style>
+    /* ── Void Theme Variables ─────────────────────── */
+    :root {
+      --color-bg:          #0d0d0d;
+      --color-surface:     #1a1a1a;
+      --color-brand:       #C6F135;
+      --color-brand-green: #39FF14;
+      --color-text:        #ffffff;
+      --glow-sm:  0 0 8px  rgba(198, 241, 53, 0.50);
+      --glow-md:  0 0 22px rgba(198, 241, 53, 0.35);
+      --glow-lg:  0 0 52px rgba(198, 241, 53, 0.20);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--color-bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 64px;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+
+    /* ── Spinner keyframe ─────────────────────────── */
+    @keyframes fidget-spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    /* ── Base spinner class ───────────────────────── */
+    .fidget-spinner {
+      animation: fidget-spin var(--spin-duration, 5s) linear infinite;
+      transform-origin: center;
+      will-change: transform;
+    }
+
+    /* ── Speed modifiers ──────────────────────────── */
+    .spin-slow   { --spin-duration: 8s;   }
+    .spin-normal { --spin-duration: 5s;   }
+    .spin-fast   { --spin-duration: 2.5s; }
+    .spin-turbo  { --spin-duration: 0.8s; }
+
+    /* ── Pause on hover (great for nav logos) ─────── */
+    .spin-pause-hover:hover .fidget-spinner {
+      animation-play-state: paused;
+    }
+
+    /* ── Glow pulse (optional) ────────────────────── */
+    @keyframes glow-pulse {
+      0%, 100% { filter: drop-shadow(0 0 6px rgba(198,241,53,0.5)); }
+      50%       { filter: drop-shadow(0 0 18px rgba(198,241,53,0.9)); }
+    }
+    .spin-glow {
+      animation: fidget-spin var(--spin-duration, 5s) linear infinite,
+                 glow-pulse 2.5s ease-in-out infinite;
+    }
+
+    /* ── Full logo lockup ─────────────────────────── */
+    .fidget-logo {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      text-decoration: none;
+    }
+    .fidget-logo .wordmark {
+      font-size: 36px;
+      font-weight: 200;
+      letter-spacing: 10px;
+      background: linear-gradient(90deg, #ffffff 0%, #e8ffcc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* ── Demo page layout ─────────────────────────── */
+    .demo-row {
+      display: flex;
+      align-items: center;
+      gap: 48px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .demo-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    .demo-label {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #555;
+    }
+    .demo-divider {
+      width: 1px;
+      height: 80px;
+      background: rgba(198,241,53,0.15);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════
+       FULL LOGO LOCKUP (nav / hero use)
+  ════════════════════════════════════════ -->
+  <a href="#" class="fidget-logo spin-pause-hover">
+    <svg width="56" height="56" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="sg" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#C6F135"/>
+          <stop offset="100%" stop-color="#39FF14"/>
+        </linearGradient>
+        <filter id="gf">
+          <feGaussianBlur stdDeviation="3" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g class="fidget-spinner spin-normal" style="transform-origin:50px 50px;" filter="url(#gf)">
+        <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg)" transform="translate(50,50) rotate(-8)"/>
+        <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg)" opacity="0.78" transform="translate(50,50) rotate(112)"/>
+        <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg)" opacity="0.58" transform="translate(50,50) rotate(232)"/>
+        <circle cx="50" cy="50" r="10" fill="#0d0d0d"/>
+        <circle cx="50" cy="50" r="6.5" fill="url(#sg)"/>
+        <circle cx="50" cy="50" r="2.5" fill="#0d0d0d"/>
+      </g>
+    </svg>
+    <span class="wordmark">FIDGET</span>
+  </a>
+
+  <!-- ═══════════════════════════════════════
+       SPEED VARIANTS
+  ════════════════════════════════════════ -->
+  <div class="demo-row">
+
+    <div class="demo-card">
+      <div class="demo-label">Slow</div>
+      <svg width="64" height="64" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="sg2" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#C6F135"/><stop offset="100%" stop-color="#39FF14"/>
+          </linearGradient>
+          <filter id="gf2"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        <g class="fidget-spinner spin-slow" style="transform-origin:50px 50px;" filter="url(#gf2)">
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg2)" transform="translate(50,50) rotate(-8)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg2)" opacity="0.78" transform="translate(50,50) rotate(112)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg2)" opacity="0.58" transform="translate(50,50) rotate(232)"/>
+          <circle cx="50" cy="50" r="10" fill="#0d0d0d"/><circle cx="50" cy="50" r="6.5" fill="url(#sg2)"/><circle cx="50" cy="50" r="2.5" fill="#0d0d0d"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="demo-divider"></div>
+
+    <div class="demo-card">
+      <div class="demo-label">Normal</div>
+      <svg width="64" height="64" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <use href="#sg2"/><use href="#gf2"/>
+        <defs>
+          <linearGradient id="sg3" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#C6F135"/><stop offset="100%" stop-color="#39FF14"/>
+          </linearGradient>
+          <filter id="gf3"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        <g class="fidget-spinner spin-normal" style="transform-origin:50px 50px;" filter="url(#gf3)">
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg3)" transform="translate(50,50) rotate(-8)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg3)" opacity="0.78" transform="translate(50,50) rotate(112)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg3)" opacity="0.58" transform="translate(50,50) rotate(232)"/>
+          <circle cx="50" cy="50" r="10" fill="#0d0d0d"/><circle cx="50" cy="50" r="6.5" fill="url(#sg3)"/><circle cx="50" cy="50" r="2.5" fill="#0d0d0d"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="demo-divider"></div>
+
+    <div class="demo-card">
+      <div class="demo-label">Fast</div>
+      <svg width="64" height="64" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="sg4" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#C6F135"/><stop offset="100%" stop-color="#39FF14"/>
+          </linearGradient>
+          <filter id="gf4"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        <g class="fidget-spinner spin-fast" style="transform-origin:50px 50px;" filter="url(#gf4)">
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg4)" transform="translate(50,50) rotate(-8)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg4)" opacity="0.78" transform="translate(50,50) rotate(112)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg4)" opacity="0.58" transform="translate(50,50) rotate(232)"/>
+          <circle cx="50" cy="50" r="10" fill="#0d0d0d"/><circle cx="50" cy="50" r="6.5" fill="url(#sg4)"/><circle cx="50" cy="50" r="2.5" fill="#0d0d0d"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="demo-divider"></div>
+
+    <div class="demo-card">
+      <div class="demo-label">Turbo + glow</div>
+      <svg width="64" height="64" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="sg5" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#C6F135"/><stop offset="100%" stop-color="#39FF14"/>
+          </linearGradient>
+        </defs>
+        <g class="fidget-spinner spin-turbo spin-glow" style="transform-origin:50px 50px;">
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg5)" transform="translate(50,50) rotate(-8)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg5)" opacity="0.78" transform="translate(50,50) rotate(112)"/>
+          <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg5)" opacity="0.58" transform="translate(50,50) rotate(232)"/>
+          <circle cx="50" cy="50" r="10" fill="#0d0d0d"/><circle cx="50" cy="50" r="6.5" fill="url(#sg5)"/><circle cx="50" cy="50" r="2.5" fill="#0d0d0d"/>
+        </g>
+      </svg>
+    </div>
+
+  </div>
+
+  <!-- ═══════════════════════════════════════
+       JS SPEED CONTROL (interactive)
+  ════════════════════════════════════════ -->
+  <div style="display:flex;flex-direction:column;align-items:center;gap:20px;">
+    <div class="demo-label">Drag to control speed</div>
+    <svg id="interactive-spinner" width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="sg6" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#C6F135"/><stop offset="100%" stop-color="#39FF14"/>
+        </linearGradient>
+        <filter id="gf6"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <g id="spinner-blades" style="transform-origin:50px 50px;" filter="url(#gf6)">
+        <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg6)" transform="translate(50,50) rotate(-8)"/>
+        <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg6)" opacity="0.78" transform="translate(50,50) rotate(112)"/>
+        <rect x="-6" y="-38" width="12" height="28" rx="6" fill="url(#sg6)" opacity="0.58" transform="translate(50,50) rotate(232)"/>
+        <circle cx="50" cy="50" r="10" fill="#0d0d0d"/>
+        <circle cx="50" cy="50" r="6.5" fill="url(#sg6)"/>
+        <circle cx="50" cy="50" r="2.5" fill="#0d0d0d"/>
+      </g>
+    </svg>
+    <input id="speed-slider" type="range" min="0.3" max="12" step="0.1" value="5"
+      style="width:200px;accent-color:#C6F135;cursor:pointer;"/>
+    <div id="speed-label" style="font-size:11px;color:#555;letter-spacing:0.1em;">5.0s per rotation</div>
+  </div>
+
+  <script>
+    // JS speed control
+    const blades = document.getElementById('spinner-blades');
+    const slider = document.getElementById('speed-slider');
+    const label  = document.getElementById('speed-label');
+
+    let angle = 0;
+    let speed = 5; // seconds per rotation → degrees per frame
+    let lastTime = null;
+
+    function degreesPerMs(secondsPerRot) {
+      return 360 / (secondsPerRot * 1000);
+    }
+
+    function tick(ts) {
+      if (!lastTime) lastTime = ts;
+      const delta = ts - lastTime;
+      lastTime = ts;
+      angle = (angle + degreesPerMs(speed) * delta) % 360;
+      blades.style.transform = `rotate(${angle}deg)`;
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    slider.addEventListener('input', () => {
+      speed = parseFloat(slider.value);
+      label.textContent = `${speed.toFixed(1)}s per rotation`;
+    });
+  </script>
+
+</body>
+</html>
