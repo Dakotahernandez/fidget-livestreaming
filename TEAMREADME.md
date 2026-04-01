@@ -11,6 +11,18 @@ One-to-many live streaming video (like Twitch), tested with users in different l
 - **Database:** PostgreSQL
 - **Media:** Nginx-RTMP, FFmpeg, HLS
 - **Infrastructure:** Docker, Docker Compose
+- **Cloud:** Oracle Cloud Free Tier or DigitalOcean (via GitHub Student Pack)
+
+## Cloud Deployment
+
+We're choosing between two providers:
+
+| Provider | Credits | Pros | Cons |
+|----------|---------|------|------|
+| **Oracle Cloud Free Tier** | Always free (4 OCPU, 24 GB RAM ARM) | Most compute for $0, never expires | Less documentation, UI can be clunky |
+| **DigitalOcean** | $200 via GitHub Student Developer Pack | Easiest setup, great docs, simple UI | Credits expire, less free compute |
+
+**Decision:** TBD — team to evaluate both and pick by Sprint 2.
 
 ## Setup
 

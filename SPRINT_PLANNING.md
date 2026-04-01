@@ -11,32 +11,32 @@
 
 | Component              | Status          |
 |------------------------|-----------------|
-| Docker / Infra         | ✅ Done          |
-| Database Schema        | ✅ Done          |
-| Backend Server Boot    | 🟡 Skeleton only |
-| Backend Business Logic | ❌ All stubs     |
-| Frontend Pages         | ❌ All stubs     |
-| Media Server (RTMP/HLS)| 🟡 Config works, no auth |
-| Edge Server            | ❌ Placeholder   |
-| Router (CDN logic)     | ❌ Stub          |
-| Cloud Deployment       | ❌ Not started   |
-| Monitoring             | ❌ Placeholder   |
-| Testing                | ❌ Not started   |
-| Documentation          | ❌ Placeholders  |
-| Presentation           | ❌ Not started   |
+| Docker / Infra         | Done             |
+| Database Schema        | Done             |
+| Backend Server Boot    | Skeleton only    |
+| Backend Business Logic | All stubs        |
+| Frontend Pages         | All stubs        |
+| Media Server (RTMP/HLS)| Config works, no auth |
+| Edge Server            | Placeholder      |
+| Router (CDN logic)     | Stub             |
+| Cloud Deployment       | Not started      |
+| Monitoring             | Placeholder      |
+| Testing                | Not started      |
+| Documentation          | Placeholders     |
+| Presentation           | Not started      |
 
 ---
 
 ## Sprint Overview
 
-| Sprint | Dates              | Theme                              |
-|--------|--------------------|------------------------------------|
-| 1      | Mar 31 – Apr 6     | Backend Core & Auth                |
-| 2      | Apr 7 – Apr 13     | Stream Management & Media Pipeline |
-| 3      | Apr 14 – Apr 20    | Frontend & Viewer Experience       |
-| 4      | Apr 21 – Apr 27    | CDN Routing, Edge Delivery & Cloud |
-| 5      | Apr 28 – May 4     | Testing, Monitoring & Polish       |
-| 6      | May 5 – May 9      | Presentation, Docs & Final Fixes   |
+| Sprint | Dates              | Theme                                        |
+|--------|--------------------|----------------------------------------------|
+| 1      | Mar 31 – Apr 6     | Backend Core & Auth                          |
+| 2      | Apr 7 – Apr 13     | Stream Management, Media Pipeline & Cloud Setup |
+| 3      | Apr 14 – Apr 20    | Frontend, Viewer Experience & Cloud Deploy   |
+| 4      | Apr 21 – Apr 27    | CDN Routing, Edge Delivery & Multi-Location  |
+| 5      | Apr 28 – May 4     | Testing, Monitoring & Polish                 |
+| 6      | May 5 – May 9      | Presentation, Docs & Final Fixes             |
 
 ---
 
@@ -80,9 +80,9 @@
 
 ---
 
-## Sprint 2 — Stream Management & Media Pipeline (Apr 7 – Apr 13)
+## Sprint 2 — Stream Management, Media Pipeline & Cloud Setup (Apr 7 – Apr 13)
 
-**Goal:** Streamers can create streams, get stream keys, and push RTMP video that gets validated and converted to HLS.
+**Goal:** Streamers can create streams, get stream keys, and push RTMP video that gets validated and converted to HLS. Cloud infrastructure is provisioned and ready.
 
 ### Tasks
 
@@ -106,17 +106,25 @@
   - Push a test stream with FFmpeg using a valid stream key
   - Confirm HLS segments appear at `http://localhost:8088/hls/<key>/index.m3u8`
   - Confirm invalid keys are rejected
+- [ ] **Cloud provider setup** — *Start early — this is the hardest part*
+  - Pick provider (see Cloud Provider Recommendations below)
+  - Create account, claim student credits
+  - Provision a VM / instance (Ubuntu, 2+ vCPU, 4+ GB RAM)
+  - Install Docker & Docker Compose on the VM
+  - Open firewall ports: 22 (SSH), 80, 443, 1935 (RTMP), 3000, 8080, 8088
+  - Verify `docker-compose up` runs on the remote VM with the current codebase
 
 ### Definition of Done
 - Stream CRUD endpoints work behind auth
 - RTMP push with valid stream key produces HLS segments
 - Invalid stream keys are rejected at the RTMP level
+- Cloud VM is provisioned with Docker running and ports open
 
 ---
 
-## Sprint 3 — Frontend & Viewer Experience (Apr 14 – Apr 20)
+## Sprint 3 — Frontend, Viewer Experience & Cloud Deploy (Apr 14 – Apr 20)
 
-**Goal:** Users can register, log in, browse live streams, and watch them via HLS in the browser.
+**Goal:** Users can register, log in, browse live streams, and watch them via HLS in the browser. The platform is live on the cloud.
 
 ### Tasks
 
@@ -148,17 +156,24 @@
   - Add navigation bar with auth-aware links
 - [ ] **Basic styling** (`frontend/src/styles/`)
   - Clean, functional CSS for all pages
+- [ ] **Deploy to cloud** — *Don't delay — deploy what you have*
+  - Push Docker images to cloud VM (or use `git clone` + build on VM)
+  - Update `.env` with production values (public IP, DB creds)
+  - Run `docker-compose up -d` on cloud VM
+  - Verify all services accessible from public IP
+  - Set up a basic deploy script or CI pipeline
 
 ### Definition of Done
 - Full user flow works: register → login → dashboard → start stream → watch
 - Viewers can watch live HLS streams in the browser
 - Navigation between pages works cleanly
+- Platform accessible from a public cloud URL
 
 ---
 
-## Sprint 4 — CDN Routing, Edge Delivery & Cloud (Apr 21 – Apr 27)
+## Sprint 4 — CDN Routing, Edge Delivery & Multi-Location Testing (Apr 21 – Apr 27)
 
-**Goal:** Edge server proxies/caches HLS content, router directs viewers to the best edge, and the platform is deployed to the cloud.
+**Goal:** Edge server proxies/caches HLS content, router directs viewers to the best edge, and multi-location testing validates the CDN architecture.
 
 ### Tasks
 
@@ -174,21 +189,25 @@
 - [ ] **Frontend integration with router**
   - Watch page queries router for the best edge URL before connecting
   - Fallback to media-server direct if router/edge unavailable
-- [ ] **Cloud deployment**
-  - Choose cloud provider (AWS / GCP / Azure free tier)
-  - Deploy at least the core services (backend, media server, edge)
-  - Configure DNS/networking for public access
-  - Document the deployment process
+- [ ] **Deploy CDN layer to cloud**
+  - Deploy edge server(s) on cloud (ideally in a second region/VM)
+  - Update router config with cloud edge URLs
+  - Verify edge caching works in production
 - [ ] **Multi-location testing**
   - Test with VPN from different geographic locations
   - Verify edge caching reduces origin load
   - Document latency/performance observations
+  - Collect data for presentation (screenshots, latency numbers)
+- [ ] **Milestone check-in prep**
+  - Prepare brief status summary for Dr. Freeman meeting
+  - Have a working demo ready to show
 
 ### Definition of Done
 - Edge server caches and serves HLS segments
 - Router health-checks edges and directs viewers
-- Platform accessible from a public cloud URL
-- VPN-based multi-location test completed
+- CDN layer deployed to cloud
+- VPN-based multi-location test completed with documented results
+- Milestone check-in with Dr. Freeman completed
 
 ---
 
@@ -280,10 +299,28 @@
 
 ---
 
+## Cloud Provider Recommendations
+
+| Provider | Free Credits | Best For | Notes |
+|----------|-------------|----------|-------|
+| **AWS (Academy/Learner Lab)** | Varies by school | Best if your course provides it | Check with Dr. Freeman — many CS courses include AWS Academy access |
+| **Oracle Cloud Free Tier** | Always free: 4 OCPU, 24 GB RAM (ARM) | Most free compute, $0 forever | Generous enough to run the entire stack; less community docs |
+| **DigitalOcean** | $200 via GitHub Student Pack | Easiest Docker deployment | Simple UI, great docs, `doctl` CLI |
+| **GCP** | $300 for 90 days (new accounts) | Good all-around | Requires credit card; auto-charges after credits expire |
+| **Azure for Students** | $100 student credits | No credit card needed | Portal can be confusing; decent VM options |
+| **Railway / Fly.io** | Small free tiers | Quick demos, easy Docker deploy | May not have enough resources for RTMP + HLS |
+
+**Recommended path:**
+1. **Oracle Cloud free tier** gives the most compute at $0 — permanently free ARM instances
+2. **DigitalOcean** via GitHub Student Developer Pack ($200 credits, easiest experience)
+3. Team to evaluate both and decide by Sprint 2
+
+---
+
 ## Notes
 
 - **Milestone check-in with Dr. Freeman** must happen before end of April (aim for Sprint 4, by Apr 27)
-- **Cloud deployment is required** — don't leave it to the last week
+- **Cloud deployment starts in Sprint 2** — provision early, deploy in Sprint 3, iterate in Sprint 4
 - **AI tool usage must be documented** for the presentation
 - Frontend doesn't need to be beautiful — functional and clear is fine
 - Focus on the networking aspects (RTMP, HLS, CDN, routing) — that's where the grade is
