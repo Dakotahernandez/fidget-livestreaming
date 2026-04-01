@@ -11,12 +11,12 @@
 
 | Component              | Status          |
 |------------------------|------------------|
-| Docker / Infra         | Done             |
-| Database Schema        | Done             |
-| Backend Server Boot    | Skeleton only    |
-| Backend Business Logic | All stubs        |
+| Docker / Infra         | **Done**         |
+| Database Schema        | **Done**         |
+| Backend Server Boot    | **Done** (Sprint 1) |
+| Backend Business Logic | **Done** (Sprint 1) |
 | Frontend Pages         | **Done** (Sprint 1) |
-| Frontend Theme / Branding | **Done** (green theme + logo) |
+| Frontend Theme / Branding | **Done** (Void theme + logo) |
 | Media Server (RTMP/HLS)| Config works, no auth |
 | Edge Server            | Placeholder      |
 | Router (CDN logic)     | Stub             |
@@ -47,34 +47,34 @@
 
 ### Tasks
 
-- [ ] **Config loading** (`backend/src/config.rs`)
+- [x] **Config loading** (`backend/src/config.rs`)
   - Load `DATABASE_URL`, `JWT_SECRET`, `RUST_LOG` from environment
   - Use a struct with a `from_env()` constructor
-- [ ] **Database pool** (`backend/src/db.rs`)
+- [x] **Database pool** (`backend/src/db.rs`)
   - Set up `sqlx::PgPool` connection pool
   - Expose an `init_pool()` function
-- [ ] **Error types** (`backend/src/errors.rs`)
+- [x] **Error types** (`backend/src/errors.rs`)
   - Define `AppError` enum (NotFound, Unauthorized, BadRequest, Internal)
   - Implement `IntoResponse` for Axum integration
-- [ ] **User model** (`backend/src/models/user.rs`)
+- [x] **User model** (`backend/src/models/user.rs`)
   - Structs: `User`, `CreateUser`, `LoginUser`
   - DB queries: `create_user()`, `find_by_username()`, `find_by_id()`
-- [ ] **Auth routes** (`backend/src/routes/auth.rs`)
+- [x] **Auth routes** (`backend/src/routes/auth.rs`)
   - `POST /api/auth/register` -- hash password with bcrypt, insert user, return JWT
   - `POST /api/auth/login` -- verify password, return JWT
-- [ ] **JWT middleware** (`backend/src/middleware/auth.rs`)
+- [x] **JWT middleware** (`backend/src/middleware/auth.rs`)
   - Extract and validate JWT from `Authorization: Bearer <token>`
-  - Inject authenticated `UserId` into request extensions
-- [ ] **Stream model** (`backend/src/models/stream.rs`)
+  - Inject authenticated `AuthUser` into request extensions
+- [x] **Stream model** (`backend/src/models/stream.rs`)
   - Structs: `Stream`, `CreateStream`
   - DB queries: `create_stream()`, `list_live_streams()`, `find_by_stream_key()`, `set_live()`, `set_offline()`
-- [ ] **Stream routes** (`backend/src/routes/streams.rs`)
+- [x] **Stream routes** (`backend/src/routes/streams.rs`)
   - `POST /api/streams` -- create a new stream (auth required), generate unique stream key
   - `GET /api/streams` -- list all live streams
   - `GET /api/streams/:id` -- get stream details
   - `PUT /api/streams/:id/start` -- mark stream as live
   - `PUT /api/streams/:id/stop` -- mark stream as offline
-- [ ] **Wire it all up in `main.rs`**
+- [x] **Wire it all up in `main.rs`**
   - Initialize config, DB pool, tracing
   - Mount auth + stream routes
   - Add CORS middleware via `tower-http`
@@ -88,7 +88,7 @@
   - Watch page -- HLS player with `hls.js` (black-box until Sprint 2 media pipeline)
   - App routing (`frontend/src/App.jsx`) -- routes + nav bar with logo
   - Void theme applied -- `#0d0d0d` bg, `#C6F135` lime brand, fidget spinner icon/logo, glow effects
-- [ ] **Verify end-to-end locally**
+- [x] **Verify end-to-end locally**
   - `docker-compose up --build` succeeds
   - Register, login, create stream all work
   - Frontend pages render and connect to API
