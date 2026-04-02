@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
 import { createStream, listStreams, startStream, stopStream } from '../services/api';
+import ScreenCapture from '../components/streamer/ScreenCapture';
 
 /** RTMP ingest URL — points to the media-server container in dev. */
 const RTMP_URL = 'rtmp://localhost:1935/live';
@@ -147,6 +148,9 @@ function Dashboard() {
               <li>Click &quot;Start Streaming&quot;</li>
             </ol>
           </div>
+
+          {/* Screen capture test — preview your screen before going live */}
+          <ScreenCapture />
 
           {/* Start / Stop toggle */}
           <div className="mt-2">
