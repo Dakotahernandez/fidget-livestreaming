@@ -94,7 +94,7 @@ function ScreenCapture() {
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: 'always' },
+        video: true,
         audio: true,
       });
 
@@ -104,6 +104,10 @@ function ScreenCapture() {
       const screenVideo = screenVideoRef.current;
       if (screenVideo) {
         screenVideo.srcObject = stream;
+        // Explicitly forec play the video element — relying on the autoPlay attribute
+        // alone causes a black screen on Windows because hidden video elements
+        // may not auto-play reliably on all platforms <----- TODO test on windows again.
+        await screenVideo.play();
       }
 
       // Create composite stream from canvas + screen audio
