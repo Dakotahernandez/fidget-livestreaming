@@ -98,3 +98,58 @@ The Vite dev server runs at **http://localhost:5173** and proxies API requests t
 | `docker compose down -v` | Stop & **delete database volume** (fresh start) |
 | `docker compose logs -f backend` | Tail backend logs |
 | `docker compose logs -f frontend` | Tail frontend Nginx logs |
+
+## Live Video Ingest Architecture
+
+### How the live feed is transmitted (browser → server)
+
+The browser cannot send RTMP directly, so we use **QUIC unreliable datagrams** via the WebTransport API to get video to the backend with minimal latency. Unlike TCP/WebSocket, QUIC datagrams don't suffer from head-of-line blocking — lost frames are simply skipped instead of delaying all subsequent frames.
+
+See [docs/quic-transport.md](docs/quic-transport.md) for a deep dive on why QUIC datagrams and the full protocol design.
+
+```
+┌──────────┐  QUIC Datagrams (UDP)  ┌─────────────┐  stdin pipe  ┌────────┐  RTMP   ┌──────────────┐
+│  Browser  │ ────────────────────► │ Rust Backend │ ──────────► │ ffmpeg │ ──────► │ nginx-rtmp   │
+│ (MediaRec)│  fragmented WebM      │ (wtransport) │  reassembled │        │  FLV    │ media-server │
+└──────────┘                        └─────────────┘   chunks     └────────┘         └──────┬───────┘
+                                                                                           │ HLS
+                                                                                      ┌────▼────┐
+                                                                                      │ Viewers │
+                                                                                      └─────────┘
+```
+
+1. **Browser (ScreenCapture component):** Uses the `MediaRecorder` API to capture the composited canvas stream (screen capture + optional webcam overlay) as **WebM with VP8 video and Opus audio**. Every 250 ms, a chunk is produced, split into ~1,200-byte fragments with an 8-byte header (`[chunk_id:u32][frag_index:u16][frag_total:u16]`), and sent as QUIC datagrams via WebTransport.
+
+2. **Rust Backend (QUIC server via wtransport):** Listens on UDP port 4443. The browser opens a WebTransport session to `https://host:4443/ingest/<stream_id>?token=<jwt>`. The server validates the JWT, confirms stream ownership, then receives datagrams, reassembles fragments back into complete chunks, and pipes them to ffmpeg's stdin.
+
+3. **Certificate trust:** The QUIC server uses a self-signed TLS certificate. At startup, the backend computes the SHA-256 hash of the leaf certificate and serves it at `GET /api/transport/cert-hash`. The browser fetches this hash and passes it to the WebTransport constructor via `serverCertificateHashes`, allowing it to trust the self-signed cert without a CA.
+
+4. **ffmpeg (transcoder):** Reads reassembled WebM chunks from stdin and transcodes to **H.264 video + AAC audio**, then pushes the result as an RTMP/FLV stream to the nginx-rtmp media server at `rtmp://media-server:1935/live/{stream_key}`.
+
+5. **nginx-rtmp (media server):** Receives the RTMP stream and segments it into **HLS** (.m3u8 + .ts files) with 3-second fragments, served over HTTP on port 8088.
+
+6. **Viewers:** Consume the HLS playlist from the edge server / media server.
+
+### Encoding details
+
+| Stage | Codec | Container/Transport | Notes |
+|-------|-------|---------------------|-------|
+| Browser → Backend | VP8 video, Opus audio | WebM over QUIC datagrams | MediaRecorder output fragmented into ~1,200-byte QUIC datagrams |
+| Backend → Media Server | H.264 video, AAC audio | FLV (over RTMP) | ffmpeg transcodes because RTMP/FLV requires H.264/AAC |
+| Media Server → Viewers | H.264 video, AAC audio | HLS (.ts segments) | nginx-rtmp segments the RTMP feed into 3-second HLS chunks |
+
+### ffmpeg flags
+
+| Flag | Purpose |
+|------|---------|
+| `-preset veryfast` | Fast encoding to minimize latency |
+| `-tune zerolatency` | Disables encoder look-ahead buffering |
+| `-g 60` | Keyframe every 60 frames (2 s at 30 fps) for seek-friendly segments |
+| `-b:a 128k` | AAC audio bitrate |
+
+### Future encoding plans
+
+- **Adaptive bitrate (ABR):** Generate multiple HLS renditions (e.g., 1080p, 720p, 480p) by running ffmpeg with multiple output maps so viewers on slower connections can downgrade automatically.
+- **Hardware acceleration:** Use NVENC or VAAPI on the server for lower CPU usage during transcoding.
+- **VP9/AV1 pass-through:** If the media server supports it in the future, skip the H.264 transcode and pass VP8/VP9 directly to reduce server load.
+- **Low-latency HLS (LL-HLS):** Reduce segment size and use partial segments + preload hints for sub-second latency.
