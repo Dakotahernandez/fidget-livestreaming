@@ -109,7 +109,7 @@ function Dashboard() {
         </form>
       </div>
 
-      {/* ── Existing streams ────────────────────────────────────────── */}
+      {/* ── Create a stream ─────────────────────────────────────────── */}
       {loading && <p className="text-center mt-2">Loading…</p>}
 
       {myStreams.map((stream) => (
@@ -148,10 +148,9 @@ function Dashboard() {
               <li>Click &quot;Start Streaming&quot;</li>
             </ol>
           </div>
-
-          {/* Screen capture test — preview your screen before going live */}
-          <ScreenCapture />
-
+            
+            {/* Screen capture test — preview your screen before going live */}
+          <ScreenCapture streamId={stream.id} />
           {/* Start / Stop toggle */}
           <div className="mt-2">
             <button

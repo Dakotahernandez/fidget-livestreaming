@@ -4,10 +4,12 @@ mod errors;
 mod models;
 mod routes;
 mod middleware;
+mod quic;
 
 use axum::{routing::get, Extension, Json, Router};
 use serde_json::json;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::Config;
@@ -18,7 +20,6 @@ async fn health_check() -> Json<serde_json::Value> {
 
 #[tokio::main]
 async fn main() {
-    // Load .env file if present (ignored in Docker where env is injected).
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::fmt::init();
@@ -32,20 +33,28 @@ async fn main() {
 
     tracing::info!("Database connected");
 
+    let cert_hash = quic::start_quic_server(
+        cfg.quic_port,
+        cfg.jwt_secret.clone(),
+        cfg.rtmp_url.clone(),
+        pool.clone(),
+    );
+    let cert_hash = Arc::new(cert_hash);
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Shared state: (PgPool, Config) — accessible via State extractor.
     let state = (pool.clone(), cfg.clone());
 
     let app = Router::new()
         .route("/health", get(health_check))
         .nest("/api/auth", routes::auth::router())
         .nest("/api/streams", routes::streams::router())
-        // Inject the JWT secret as an extension so the auth middleware can read it.
+        .route("/api/transport/cert-hash", get(routes::ingest::cert_hash))
         .layer(Extension(cfg.jwt_secret.clone()))
+        .layer(Extension(cert_hash))
         .layer(cors)
         .with_state(state);
 

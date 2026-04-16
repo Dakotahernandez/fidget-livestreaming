@@ -49,4 +49,14 @@ export const startStream = (id) =>
 export const stopStream = (id) =>
   api.put(`/streams/${id}/stop`);
 
+export const getCertHash = () =>
+  api.get('/transport/cert-hash');
+
+export const getTransportUrl = (streamId) => {
+  const token = localStorage.getItem('token');
+  const host = window.location.hostname;
+  const quicPort = 4443;
+  return `https://${host}:${quicPort}/ingest/${streamId}?token=${token}`;
+};
+
 export default api;

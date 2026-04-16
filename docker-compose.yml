@@ -31,6 +31,7 @@ services:
         condition: service_healthy
     ports:
       - "8080:8080"
+      - "4443:4443/udp"
     networks:
       - fidget-net
 

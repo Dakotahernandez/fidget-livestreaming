@@ -1,11 +1,15 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
+import { getCertHash, getTransportUrl } from '../../services/api';
 
 const MIME_TYPE = 'video/webm;codecs=vp8,opus';
 const CANVAS_FPS = 30;
 const DRAW_INTERVAL_MS = Math.round(1000 / CANVAS_FPS);
-const WEBCAM_SCALE = 0.25; // webcam occupies 25% of canvas width
+const WEBCAM_SCALE = 0.25;
+const STREAM_TIMESLICE_MS = 250;
+const FRAGMENT_HEADER_SIZE = 8;
+const MAX_DATAGRAM_PAYLOAD = 1200;
 
-function ScreenCapture() {
+function ScreenCapture({ streamId }) {
   const canvasRef = useRef(null);
   const screenVideoRef = useRef(null);
   const webcamVideoRef = useRef(null);
@@ -18,15 +22,20 @@ function ScreenCapture() {
 
   const [isCapturing, setIsCapturing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [webcamOn, setWebcamOn] = useState(false);
   const [recordings, setRecordings] = useState([]);
   const [error, setError] = useState(null);
 
-  // Keep a ref so the draw loop always sees the latest webcam state
+  const wsRef = useRef(null);
+  const transportRef = useRef(null);
+  const datagramWriterRef = useRef(null);
+  const chunkIdRef = useRef(0);
+  const streamRecorderRef = useRef(null);
+
   const webcamOnRef = useRef(false);
   useEffect(() => { webcamOnRef.current = webcamOn; }, [webcamOn]);
 
-  /** Draws screen (+ optional webcam overlay) onto the canvas once per call. */
   const drawComposite = useCallback(() => {
     const canvas = canvasRef.current;
     const screenVideo = screenVideoRef.current;
@@ -36,16 +45,13 @@ function ScreenCapture() {
     const sw = screenVideo.videoWidth || 1920;
     const sh = screenVideo.videoHeight || 1080;
 
-    // Match canvas to screen resolution
     if (canvas.width !== sw || canvas.height !== sh) {
       canvas.width = sw;
       canvas.height = sh;
     }
 
-    // Draw screen capture
     ctx.drawImage(screenVideo, 0, 0, sw, sh);
 
-    // Draw webcam overlay in top-right corner
     const webcamVideo = webcamVideoRef.current;
     if (webcamOnRef.current && webcamVideo && webcamVideo.readyState >= 2) {
       const camW = Math.round(sw * WEBCAM_SCALE);
@@ -54,7 +60,6 @@ function ScreenCapture() {
       const x = sw - camW - padding;
       const y = padding;
 
-      // Rounded rectangle clip + border
       const radius = 12;
       ctx.save();
       ctx.beginPath();
@@ -72,7 +77,6 @@ function ScreenCapture() {
       ctx.drawImage(webcamVideo, x, y, camW, camH);
       ctx.restore();
 
-      // Border
       ctx.strokeStyle = 'rgba(198, 241, 53, 0.6)';
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -100,26 +104,18 @@ function ScreenCapture() {
 
       screenStreamRef.current = stream;
 
-      // Feed into a hidden video element for canvas drawing
       const screenVideo = screenVideoRef.current;
       if (screenVideo) {
         screenVideo.srcObject = stream;
-        // Explicitly forec play the video element — relying on the autoPlay attribute
-        // alone causes a black screen on Windows because hidden video elements
-        // may not auto-play reliably on all platforms <----- TODO test on windows again.
         await screenVideo.play();
       }
 
-      // Create composite stream from canvas + screen audio
       const canvas = canvasRef.current;
       const canvasStream = canvas.getContext('2d') && canvas.captureStream(CANVAS_FPS);
-      // Carry over audio tracks from screen capture
       stream.getAudioTracks().forEach((track) => canvasStream.addTrack(track));
       compositeStreamRef.current = canvasStream;
 
       setIsCapturing(true);
-      // Use setInterval instead of requestAnimationFrame so the draw loop
-      // keeps running even when a permission dialog (getUserMedia) steals focus.
       drawIntervalRef.current = setInterval(drawComposite, DRAW_INTERVAL_MS);
 
       stream.getVideoTracks()[0].addEventListener('ended', () => {
@@ -142,6 +138,22 @@ function ScreenCapture() {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
+    if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
+      streamRecorderRef.current.stop();
+    }
+    streamRecorderRef.current = null;
+    if (datagramWriterRef.current) {
+      datagramWriterRef.current.close();
+      datagramWriterRef.current = null;
+    }
+    if (transportRef.current) {
+      transportRef.current.close();
+      transportRef.current = null;
+    }
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
@@ -156,12 +168,12 @@ function ScreenCapture() {
 
     setIsCapturing(false);
     setIsRecording(false);
+    setIsStreaming(false);
     setWebcamOn(false);
   }, []);
 
   const toggleWebcam = useCallback(async () => {
     if (webcamOn) {
-      // Turn off
       if (webcamStreamRef.current) {
         webcamStreamRef.current.getTracks().forEach((t) => t.stop());
         webcamStreamRef.current = null;
@@ -169,7 +181,6 @@ function ScreenCapture() {
       if (webcamVideoRef.current) webcamVideoRef.current.srcObject = null;
       setWebcamOn(false);
     } else {
-      // Turn on
       setError(null);
       try {
         const camStream = await navigator.mediaDevices.getUserMedia({
@@ -180,8 +191,6 @@ function ScreenCapture() {
         const webcamVideo = webcamVideoRef.current;
         if (webcamVideo) {
           webcamVideo.srcObject = camStream;
-          // Wait for the video to actually start producing frames before
-          // flipping the flag, so the draw loop won't try to read a stale element.
           await webcamVideo.play();
         }
         setWebcamOn(true);
@@ -240,12 +249,124 @@ function ScreenCapture() {
     setRecordings([]);
   }, [recordings]);
 
-  // Clean up on unmount
+  const sendChunkAsDatagrams = useCallback(async (arrayBuffer) => {
+    const writer = datagramWriterRef.current;
+    if (!writer) return;
+
+    const chunkId = chunkIdRef.current;
+    chunkIdRef.current = (chunkIdRef.current + 1) & 0xFFFFFFFF;
+
+    const data = new Uint8Array(arrayBuffer);
+    const fragPayload = MAX_DATAGRAM_PAYLOAD - FRAGMENT_HEADER_SIZE;
+    const fragTotal = Math.ceil(data.length / fragPayload) || 1;
+
+    for (let i = 0; i < fragTotal; i++) {
+      const offset = i * fragPayload;
+      const slice = data.subarray(offset, offset + fragPayload);
+      const dgram = new Uint8Array(FRAGMENT_HEADER_SIZE + slice.length);
+
+      const view = new DataView(dgram.buffer);
+      view.setUint32(0, chunkId, false);
+      view.setUint16(4, i, false);
+      view.setUint16(6, fragTotal, false);
+
+      dgram.set(slice, FRAGMENT_HEADER_SIZE);
+
+      try {
+        await writer.write(dgram);
+      } catch {
+        return;
+      }
+    }
+  }, []);
+
+  const startStreaming = useCallback(async () => {
+    if (!compositeStreamRef.current || !streamId) return;
+    setError(null);
+
+    try {
+      const { data } = await getCertHash();
+      const hashBytes = new Uint8Array(
+        data.hash.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)),
+      );
+
+      const url = getTransportUrl(streamId);
+      const transport = new WebTransport(url, {
+        serverCertificateHashes: [
+          { algorithm: 'sha-256', value: hashBytes.buffer },
+        ],
+      });
+
+      await transport.ready;
+      transportRef.current = transport;
+
+      const writer = transport.datagrams.writable.getWriter();
+      datagramWriterRef.current = writer;
+      chunkIdRef.current = 0;
+
+      const recorder = new MediaRecorder(compositeStreamRef.current, {
+        mimeType: MIME_TYPE,
+      });
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0 && transportRef.current) {
+          e.data.arrayBuffer().then((buf) => sendChunkAsDatagrams(buf));
+        }
+      };
+
+      recorder.onstop = () => {
+        if (datagramWriterRef.current) {
+          datagramWriterRef.current.close();
+          datagramWriterRef.current = null;
+        }
+        if (transportRef.current) {
+          transportRef.current.close();
+          transportRef.current = null;
+        }
+      };
+
+      recorder.start(STREAM_TIMESLICE_MS);
+      streamRecorderRef.current = recorder;
+      setIsStreaming(true);
+
+      transport.closed.then(() => {
+        setIsStreaming(false);
+      }).catch(() => {
+        setIsStreaming(false);
+      });
+    } catch (err) {
+      setError(`WebTransport connection failed: ${err.message}`);
+      setIsStreaming(false);
+    }
+  }, [streamId, sendChunkAsDatagrams]);
+
+  const stopStreaming = useCallback(() => {
+    if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
+      streamRecorderRef.current.stop();
+    }
+    streamRecorderRef.current = null;
+    if (datagramWriterRef.current) {
+      datagramWriterRef.current.close();
+      datagramWriterRef.current = null;
+    }
+    if (transportRef.current) {
+      transportRef.current.close();
+      transportRef.current = null;
+    }
+    setIsStreaming(false);
+  }, []);
+
   useEffect(() => {
     return () => {
       if (drawIntervalRef.current) clearInterval(drawIntervalRef.current);
       if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach((t) => t.stop());
       if (webcamStreamRef.current) webcamStreamRef.current.getTracks().forEach((t) => t.stop());
+      if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
+        streamRecorderRef.current.stop();
+      }
+      if (datagramWriterRef.current) datagramWriterRef.current.close();
+      if (transportRef.current) transportRef.current.close();
+      if (wsRef.current) wsRef.current.close();
     };
   }, []);
 
@@ -259,11 +380,9 @@ function ScreenCapture() {
 
       {error && <p className="error-msg">{error}</p>}
 
-      {/* Hidden video elements that feed into the canvas */}
       <video ref={screenVideoRef} autoPlay muted playsInline style={{ display: 'none' }} />
       <video ref={webcamVideoRef} autoPlay muted playsInline style={{ display: 'none' }} />
 
-      {/* Composited preview canvas */}
       <div className="video-wrapper" style={{ marginBottom: '0.75rem' }}>
         <canvas
           ref={canvasRef}
@@ -274,7 +393,6 @@ function ScreenCapture() {
         )}
       </div>
 
-      {/* Controls */}
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
         {!isCapturing ? (
           <button className="btn" type="button" onClick={startCapture}>
@@ -303,6 +421,19 @@ function ScreenCapture() {
                 Stop Recording
               </button>
             )}
+            {streamId && (
+              !isStreaming ? (
+                <button className="btn" type="button" onClick={startStreaming}
+                  style={{ background: '#e63946', color: '#fff', fontWeight: 700 }}>
+                  ● Go Live
+                </button>
+              ) : (
+                <button className="btn" type="button" onClick={stopStreaming}
+                  style={{ background: '#e63946', color: '#fff', fontWeight: 700 }}>
+                  ■ Stop Live
+                </button>
+              )
+            )}
           </>
         )}
       </div>
@@ -311,7 +442,10 @@ function ScreenCapture() {
         <p style={{ color: 'var(--color-danger)', fontWeight: 700 }}>● Recording...</p>
       )}
 
-      {/* Recordings list */}
+      {isStreaming && (
+        <p style={{ color: '#e63946', fontWeight: 700 }}>● LIVE — streaming to server</p>
+      )}
+
       {recordings.length > 0 && (
         <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem', marginTop: '0.75rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
