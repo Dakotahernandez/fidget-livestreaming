@@ -13,6 +13,25 @@ One-to-many live streaming video (like Twitch), tested with users in different l
 - **Infrastructure:** Docker, Docker Compose
 - **Cloud:** Oracle Cloud Free Tier or DigitalOcean (via GitHub Student Pack)
 
+## Current State (April 21, 2026)
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Core backend API (auth + streams) | Implemented | Axum routes for register/login and stream CRUD are wired and running in Docker. |
+| QUIC ingest path | Implemented | Browser WebTransport -> backend QUIC server -> ffmpeg pipe -> RTMP publish flow is documented and integrated. |
+| Frontend app pages | Implemented | Home, login/register, dashboard, and watch page exist and connect to backend APIs. |
+| Router service | Implemented (baseline) | GeoIP-based nearest-edge selection is implemented with fallback when GeoLite2 DB is missing. |
+| Media server auth hooks | Not implemented | `media-server/scripts/on_publish.sh` is still TODO, and nginx `on_publish`/`on_publish_done` callbacks are not enabled yet. |
+| Edge caching layer | Placeholder | `edge/nginx.conf` currently returns a readiness response and does not proxy/cache HLS yet. |
+| Monitoring + testing docs | Partial | Architecture docs are present; `docs/testing.md` is still a placeholder. |
+| Cloud deployment | In progress | Dockerized stack is ready locally; provider selection/deployment details are still being finalized. |
+
+### Immediate Next Priorities
+
+1. Implement and wire stream-key validation in media-server `on_publish` callbacks.
+2. Replace edge placeholder config with HLS proxy + cache policy.
+3. Add monitoring metrics/dashboard and complete testing documentation.
+
 ## GeoIP-Based Viewer Routing
 
 The CDN router uses MaxMind's GeoLite2 City database to perform location-aware edge server selection. When a viewer requests a stream, the router:
@@ -40,7 +59,7 @@ We're choosing between two providers:
 | **Oracle Cloud Free Tier** | Always free (4 OCPU, 24 GB RAM ARM) | Most compute for $0, never expires | Less documentation, UI can be clunky |
 | **DigitalOcean** | $200 via GitHub Student Developer Pack | Easiest setup, great docs, simple UI | Credits expire, less free compute |
 
-**Decision:** TBD — team to evaluate both and pick by Sprint 2.
+**Decision:** In progress — team is evaluating both and will finalize provider selection before full multi-region deployment.
 
 ## Setup
 

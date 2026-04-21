@@ -4,6 +4,25 @@ Goal: Apply the knowledge you've learned in new ways.
 # Project description
 This is an open-ended project. Students can extend their BearTV project or do something new from the ground up. Project ideas must be approved by Dr. Freeman.
 
+## Current project state (April 21, 2026)
+
+Our project (Fidget: one-to-many live streaming with CDN-style delivery) is currently in an implementation-complete state for the core app path and partially complete for CDN hardening.
+
+Completed:
+- Dockerized multi-service local stack (frontend, backend, database, media server, edge, router)
+- Backend auth + stream APIs in Rust/Axum
+- QUIC ingest path (browser -> backend QUIC -> ffmpeg -> RTMP/HLS pipeline)
+- Frontend pages for auth, dashboard, and watch playback
+- Router baseline with GeoIP-aware nearest-edge selection + fallback
+
+In progress / remaining:
+- Stream-key validation hooks in media server `on_publish` flow
+- Edge server HLS proxy/cache behavior
+- Monitoring dashboards and finalized testing documentation
+- Final cloud provider selection and full multi-region deployment validation
+
+Detailed technical status and architecture notes are maintained in `TEAMREADME.md` and `docs/`.
+
 You must give a **formal presentation** of your project in place of a final exam. Each group will have ~12 minutes to present their work. Each member of the group must speak. You should have slides. Your presentation must include a demo of your project, although it may invlude a pre-recorded screen capture. In your presentation, you should introduce the problem that you addressed, how you addressed it, technical challenges you faced, what you learned, and next steps (if you were to continue developing it).
 
 You may use AI LLM tools to assist with the development of your project, including code assistant tools like GitHub Copilot. If you do use any AI tools, you must describe your use during your presentation.
