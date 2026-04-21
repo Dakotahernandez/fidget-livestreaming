@@ -1,5 +1,117 @@
 # Architecture
 
+## End-to-End Streaming Pipeline
+
+This diagram shows the full path of a live stream from the **streamer** through
+**ingest**, **transcoding**, the **control plane** (auth, geo-routing,
+metrics), out to **edge PoPs**, and finally to **viewers** on different client
+form factors.
+
+```mermaid
+flowchart LR
+    %% ===== Streamer (origin) =====
+    subgraph SRC["Streamer (Origin)"]
+        direction TB
+        ST[["Streamer Browser<br/>React + MediaRecorder<br/>WebTransport (QUIC)"]]
+    end
+
+    %% ===== Ingest tier =====
+    subgraph INGEST["Ingest Tier"]
+        direction TB
+        QUIC["QUIC Ingest Server<br/>Rust + wtransport<br/>:4443/udp"]
+        FF["ffmpeg Transcoder<br/>WebM → H.264 / AAC"]
+        RTMP["nginx-rtmp<br/>RTMP → HLS<br/>:1935"]
+        HLS[("HLS Segments<br/>shared volume")]
+    end
+
+    %% ===== Control plane =====
+    subgraph CTRL["Control Plane"]
+        direction TB
+        API["Axum REST API<br/>auth · streams · cert-hash<br/>:8080"]
+        DB[("PostgreSQL 16<br/>users · streams")]
+        ROUTER["Geo Router<br/>MaxMind GeoLite2<br/>:8070"]
+        MON["Prometheus + Grafana<br/>metrics & dashboards"]
+    end
+
+    %% ===== Edge / CDN tier =====
+    subgraph EDGES["Edge Delivery Tier (PoPs)"]
+        direction TB
+        E1["Edge PoP — US-East<br/>nginx :8090"]
+        E2["Edge PoP — US-West<br/>nginx :8090"]
+        E3["Edge PoP — EU<br/>nginx :8090"]
+    end
+
+    %% ===== Clients =====
+    subgraph CLIENTS["Viewers / Clients"]
+        direction TB
+        CW["Web Browser<br/>HLS.js Player"]
+        CM["Mobile Browser<br/>native HLS"]
+        CT["Smart TV / OTT App<br/>HLS"]
+    end
+
+    %% ----- Streamer control flow -----
+    ST -- "REST: login, create stream,<br/>fetch cert-hash (JWT)" --> API
+    API -- "SQL" --> DB
+
+    %% ----- Streamer media flow -----
+    ST == "QUIC datagrams<br/>(fragmented WebM)" ==> QUIC
+    QUIC -- "validate JWT &<br/>stream ownership" --> DB
+    QUIC == "reassembled chunks<br/>(stdin pipe)" ==> FF
+    FF == "RTMP / FLV" ==> RTMP
+    RTMP == "writes .m3u8 + .ts" ==> HLS
+
+    %% ----- Fan-out to edges -----
+    HLS == "pull / shared volume" ==> E1
+    HLS == "pull / shared volume" ==> E2
+    HLS == "pull / shared volume" ==> E3
+
+    %% ----- Viewer routing -----
+    CW -- "GET /api/route/:stream_id" --> ROUTER
+    CM -- "GET /api/route/:stream_id" --> ROUTER
+    CT -- "GET /api/route/:stream_id" --> ROUTER
+    ROUTER -- "GeoIP lookup" --> DB
+    ROUTER -. "nearest edge URL" .-> CW
+    ROUTER -. "nearest edge URL" .-> CM
+    ROUTER -. "nearest edge URL" .-> CT
+
+    %% ----- Viewer playback -----
+    CW == "HLS (.m3u8 / .ts)" ==> E1
+    CM == "HLS (.m3u8 / .ts)" ==> E2
+    CT == "HLS (.m3u8 / .ts)" ==> E3
+
+    %% ----- Observability -----
+    QUIC -. metrics .-> MON
+    API  -. metrics .-> MON
+    RTMP -. metrics .-> MON
+    ROUTER -. metrics .-> MON
+    E1 -. metrics .-> MON
+    E2 -. metrics .-> MON
+    E3 -. metrics .-> MON
+
+    %% ----- Styling -----
+    classDef origin   fill:#fde68a,stroke:#b45309,color:#1f2937;
+    classDef ingest   fill:#bfdbfe,stroke:#1d4ed8,color:#1f2937;
+    classDef control  fill:#ddd6fe,stroke:#6d28d9,color:#1f2937;
+    classDef edge     fill:#bbf7d0,stroke:#15803d,color:#1f2937;
+    classDef client   fill:#fecaca,stroke:#b91c1c,color:#1f2937;
+    classDef store    fill:#e5e7eb,stroke:#374151,color:#1f2937;
+
+    class ST origin;
+    class QUIC,FF,RTMP ingest;
+    class API,ROUTER,MON control;
+    class E1,E2,E3 edge;
+    class CW,CM,CT client;
+    class DB,HLS store;
+```
+
+**Legend**
+
+- **Thick solid arrows (`==>`)** — hot media path (video bytes).
+- **Thin solid arrows (`-->`)** — synchronous control / REST calls.
+- **Dotted arrows (`-.->`)** — asynchronous responses or telemetry.
+- Colors group nodes by tier: origin, ingest, control plane, edge, clients,
+  and persistent storage.
+
 ## System Overview
 
 ```mermaid
