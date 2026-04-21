@@ -1,4 +1,10 @@
 # Fidget
+CHECKOUT
+Dakota - END TO END streamer -> server -> viewer pipeline
+BEN - stream key validation
+Chandler - DEPLOY 
+JOSH - NODE container
+
 
 > One-to-many live streaming platform with multi-server CDN delivery
 
