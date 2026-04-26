@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Hls from 'hls.js';
-import { getStream } from '../services/api';
+import { getStream, getHlsUrl } from '../services/api';
 
 /**
  * Watch page — plays an HLS stream.
@@ -40,7 +40,7 @@ function Watch() {
   useEffect(() => {
     if (!stream?.stream_key || !videoRef.current) return;
 
-    const hlsUrl = `/hls/${stream.stream_key}/index.m3u8`;
+    const hlsUrl = getHlsUrl(stream.stream_key);
 
     if (Hls.isSupported()) {
       const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
