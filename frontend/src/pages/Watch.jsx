@@ -41,15 +41,29 @@ function Watch() {
     if (!stream?.stream_key || !videoRef.current) return;
 
     const hlsUrl = getHlsUrl(stream.stream_key);
-
+    console.log('Loading HLS URL: ', hlsUrl);
     if (Hls.isSupported()) {
       const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
       hls.loadSource(hlsUrl);
       hls.attachMedia(videoRef.current);
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) {
-          setPlayerError('Stream is not available yet. Waiting for the broadcaster…');
+        // if (data.fatal) {
+        //   setPlayerError('Stream is not available yet. Waiting for the broadcaster…');
+        // }
+        if (!data.fatal){
+          return;
+        }
+        setPlayerError('Stream is not available yet. Waiting for the broadcaster…');
+        if (data.type === Hls.ErrorTypes.NETWORK_ERRROR){
+          setTimeout(() => {
+            hls.loadSource(hlsUrl);
+            hls.startLoad();
+          }, 2000);
+        } else if(data.type === Hls.ErrorTypes.MEDIA_ERROR){
+          hls.recovereMediaError();
+        } else {
+          hls.destroy();
         }
       });
 

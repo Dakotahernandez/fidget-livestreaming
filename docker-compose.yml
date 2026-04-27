@@ -51,6 +51,8 @@ services:
       - "8088:8088"
     volumes:
       - hls_segments:/tmp/hls
+    depends_on:
+      - backend
     networks:
       - fidget-net
 

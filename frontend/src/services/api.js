@@ -59,4 +59,10 @@ export const getTransportUrl = (streamId) => {
   return `https://${host}:${quicPort}/ingest/${streamId}?token=${token}`;
 };
 
+export const getHlsUrl = (streamKey) => {
+  const host = window.location.hostname;
+  const edgePort = 8090;
+  return `http://${host}:${edgePort}/hls/${streamKey}/index.m3u8`;
+};
+
 export default api;
