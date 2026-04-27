@@ -107,16 +107,16 @@
 
 ### Tasks
 
-- [ ] **Stream key validation** (`media-server/scripts/on_publish.sh`)
+- [X] **Stream key validation** (`media-server/scripts/on_publish.sh`)
   - On RTMP publish, call backend API to validate the stream key
   - Accept/reject the RTMP connection based on response
   - Mark stream as live on successful publish
   - Mark stream as offline on `on_publish_done`
-- [ ] **Media server `on_publish` integration** (`media-server/nginx.conf`)
+- [X] **Media server `on_publish` integration** (`media-server/nginx.conf`)
   - Enable `on_publish` callback pointing to the validation script
   - Enable `on_publish_done` callback for cleanup
   - Tune HLS settings: segment length, playlist depth, fragment naming
-- [ ] **Verify end-to-end RTMP -> HLS locally**
+- [X] **Verify end-to-end RTMP -> HLS locally**
   - Push a test stream with FFmpeg using a valid stream key
   - Confirm HLS segments appear at `http://localhost:8088/hls/<key>/index.m3u8`
   - Confirm invalid keys are rejected at the RTMP level
@@ -125,7 +125,7 @@
   - Test latency from RTMP push to HLS playback
   - Adjust segment duration and playlist size for acceptable latency
   - Document observed latency numbers
-- [ ] **Cloud provider setup** -- *Start early, this is the hardest part*
+- [ ] **Cloud provider setup** -- *Start early, this is the hardest part* <---chandler
   - Pick provider (Oracle Cloud Free Tier or DigitalOcean)
   - Create account, claim student credits
   - Provision a VM / instance (Ubuntu, 2+ vCPU, 4+ GB RAM)
