@@ -8,4 +8,4 @@ EXPOSE 1935 8088
 # /etc/nginx/nginx.conf with a default at startup) and run nginx directly
 # with our config in the foreground.
 ENTRYPOINT []
-CMD ["nginx", "-c", "/etc/nginx/nginx.conf"]
+CMD ["nginx", "-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
