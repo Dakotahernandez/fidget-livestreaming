@@ -12,6 +12,11 @@ export default defineConfig({
         target: 'http://backend:8080',
         changeOrigin: true,
       },
+      '/router-api': {
+        target: 'http://localhost:8070',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/router-api/, '/api'),
+      },
       '/hls': {
         target: 'http://localhost:8088',
         changeOrigin: true,

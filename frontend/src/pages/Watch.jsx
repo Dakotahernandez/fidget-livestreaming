@@ -1,7 +1,17 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Hls from 'hls.js';
-import { getStream, joinStream } from '../services/api';
+import { getStream, joinStream, resolvePlaybackRoute } from '../services/api';
+
+const EMPTY_PLAYBACK_METRICS = {
+  source: '',
+  edgeId: '',
+  routeLookupMs: null,
+  manifestLoadMs: null,
+  firstFrameMs: null,
+  liveLatencyMs: null,
+  bufferMs: null,
+};
 
 /**
  * Watch page — plays an HLS stream.
@@ -18,13 +28,47 @@ function Watch() {
   const [joinPassword, setJoinPassword] = useState('');
   const [joinError, setJoinError] = useState('');
   const [joining, setJoining] = useState(false);
+  const [playbackMetrics, setPlaybackMetrics] = useState(EMPTY_PLAYBACK_METRICS);
 
-  const unlockStream = async (password = '') => {
+  const updatePlaybackMetrics = useCallback((partial) => {
+    setPlaybackMetrics((current) => ({ ...current, ...partial }));
+  }, []);
+
+  const unlockStream = useCallback(async (password = '') => {
     try {
+      const startedAt = performance.now();
       setJoining(true);
       setJoinError('');
+      setPlayerError('');
+      setPlaybackMetrics(EMPTY_PLAYBACK_METRICS);
+
       const res = await joinStream(id, password);
-      setHlsUrl(res.data?.hls_url || '');
+      const fallbackUrl = res.data?.hls_url || '';
+      const streamKey = res.data?.stream_key || '';
+
+      let nextUrl = fallbackUrl;
+      let playbackSource = 'origin';
+      let edgeId = '';
+
+      if (streamKey) {
+        try {
+          const routeRes = await resolvePlaybackRoute(streamKey);
+          if (routeRes.data?.edge_url) {
+            nextUrl = routeRes.data.edge_url;
+            playbackSource = 'edge';
+            edgeId = routeRes.data?.edge_id || '';
+          }
+        } catch {
+          playbackSource = 'origin-fallback';
+        }
+      }
+
+      updatePlaybackMetrics({
+        source: playbackSource,
+        edgeId,
+        routeLookupMs: Math.round(performance.now() - startedAt),
+      });
+      setHlsUrl(nextUrl);
     } catch (err) {
       const msg = err.response?.data?.error || 'Unable to join this stream.';
       setJoinError(msg);
@@ -32,7 +76,7 @@ function Watch() {
     } finally {
       setJoining(false);
     }
-  };
+  }, [id, updatePlaybackMetrics]);
 
   // Fetch stream details from the backend.
   useEffect(() => {
@@ -56,16 +100,64 @@ function Watch() {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, unlockStream]);
 
   // Attach HLS.js when a stream URL is available.
   useEffect(() => {
     if (!hlsUrl || !videoRef.current) return;
 
+    const video = videoRef.current;
+    const playbackStartedAt = performance.now();
+    let metricTimer = null;
+
+    const updateBufferMetrics = (currentHls = hlsRef.current) => {
+      const nextMetrics = {};
+
+      if (currentHls && Number.isFinite(currentHls.latency)) {
+        nextMetrics.liveLatencyMs = Math.round(currentHls.latency * 1000);
+      }
+
+      if (video.buffered.length > 0) {
+        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+        nextMetrics.bufferMs = Math.max(
+          0,
+          Math.round((bufferedEnd - video.currentTime) * 1000),
+        );
+      }
+
+      if (Object.keys(nextMetrics).length > 0) {
+        updatePlaybackMetrics(nextMetrics);
+      }
+    };
+
+    const handlePlaying = () => {
+      updatePlaybackMetrics({
+        firstFrameMs: Math.round(performance.now() - playbackStartedAt),
+      });
+    };
+
+    video.addEventListener('playing', handlePlaying);
+    setPlayerError('');
+    updatePlaybackMetrics({
+      manifestLoadMs: null,
+      firstFrameMs: null,
+      liveLatencyMs: null,
+      bufferMs: null,
+    });
+
     if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 2,
+        maxBufferLength: 2,
+        maxMaxBufferLength: 4,
+        backBufferLength: 8,
+        maxLiveSyncPlaybackRate: 1.5,
+      });
       hls.loadSource(hlsUrl);
-      hls.attachMedia(videoRef.current);
+      hls.attachMedia(video);
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
@@ -74,25 +166,46 @@ function Watch() {
       });
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        updatePlaybackMetrics({
+          manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
+        });
         setPlayerError('');
-        videoRef.current.play().catch(() => {});
+        video.play().catch(() => {});
       });
 
+      hls.on(Hls.Events.LEVEL_UPDATED, () => updateBufferMetrics(hls));
+
       hlsRef.current = hls;
+      metricTimer = window.setInterval(() => updateBufferMetrics(hls), 1000);
     } else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
       // Safari native HLS.
-      videoRef.current.src = hlsUrl;
+      const handleLoadedMetadata = () => {
+        updatePlaybackMetrics({
+          manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
+        });
+        video.play().catch(() => {});
+      };
+
+      video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
+      video.src = hlsUrl;
+      metricTimer = window.setInterval(() => updateBufferMetrics(null), 1000);
     } else {
       setPlayerError('Your browser does not support HLS playback.');
     }
 
     return () => {
+      if (metricTimer) {
+        window.clearInterval(metricTimer);
+      }
+      video.removeEventListener('playing', handlePlaying);
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
     };
-  }, [hlsUrl]);
+  }, [hlsUrl, updatePlaybackMetrics]);
+
+  const metricLabel = (value) => (value == null ? '...' : `${value} ms`);
 
   return (
     <div className="page">
@@ -140,6 +253,17 @@ function Watch() {
               <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
                 {stream?.username || (stream ? `User #${stream.user_id}` : '')}
               </p>
+              <div style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                <p>
+                  Source: {playbackMetrics.source || 'pending'}
+                  {playbackMetrics.edgeId ? ` (${playbackMetrics.edgeId})` : ''}
+                </p>
+                <p>Route lookup: {metricLabel(playbackMetrics.routeLookupMs)}</p>
+                <p>Manifest load: {metricLabel(playbackMetrics.manifestLoadMs)}</p>
+                <p>First frame: {metricLabel(playbackMetrics.firstFrameMs)}</p>
+                <p>Estimated live latency: {metricLabel(playbackMetrics.liveLatencyMs)}</p>
+                <p>Buffered ahead: {metricLabel(playbackMetrics.bufferMs)}</p>
+              </div>
             </div>
           </>
         )}

@@ -140,6 +140,7 @@ async fn join_stream(
         "id": s.id,
         "title": s.title,
         "is_live": s.is_live,
+        "stream_key": s.stream_key,
         "hls_url": format!("/hls/{}/index.m3u8", s.stream_key),
     })))
 }

@@ -55,7 +55,7 @@ fn load_edges_from_env() -> Vec<EdgeServer> {
     if raw.is_empty() {
         return vec![EdgeServer {
             id: "edge-local".to_string(),
-            url: "http://edge:8090".to_string(),
+            url: "http://localhost:8090".to_string(),
             location: Location {
                 latitude: 0.0,
                 longitude: 0.0,
@@ -196,7 +196,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/api/route/{stream_key}", get(route_viewer))
+        .route("/api/route/:stream_key", get(route_viewer))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], ROUTER_PORT));

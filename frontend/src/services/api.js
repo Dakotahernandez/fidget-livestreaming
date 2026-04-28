@@ -5,6 +5,10 @@ const api = axios.create({
   baseURL: '/api',
 });
 
+const routerApi = axios.create({
+  baseURL: '/router-api',
+});
+
 // ── JWT interceptor ──────────────────────────────────────────────────
 // Attach the stored token to every outgoing request automatically.
 api.interceptors.request.use((config) => {
@@ -52,6 +56,9 @@ export const getStream = (id) =>
 
 export const joinStream = (id, password = '') =>
   api.post(`/streams/${id}/join`, { password });
+
+export const resolvePlaybackRoute = (streamKey) =>
+  routerApi.get(`/route/${streamKey}`);
 
 export const startStream = (id) =>
   api.put(`/streams/${id}/start`);

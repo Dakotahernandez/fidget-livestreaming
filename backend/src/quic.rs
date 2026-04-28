@@ -187,6 +187,8 @@ async fn handle_session(
     // Spawn ffmpeg: read WebM from stdin → transcode to H.264/AAC → push RTMP.
     let ffmpeg_result = Command::new("ffmpeg")
         .args([
+            "-fflags",
+            "nobuffer",
             "-i",
             "pipe:0",
             "-c:v",
@@ -196,7 +198,13 @@ async fn handle_session(
             "-tune",
             "zerolatency",
             "-g",
-            "60",
+            "30",
+            "-keyint_min",
+            "30",
+            "-sc_threshold",
+            "0",
+            "-force_key_frames",
+            "expr:gte(t,n_forced*1)",
             "-c:a",
             "aac",
             "-b:a",
