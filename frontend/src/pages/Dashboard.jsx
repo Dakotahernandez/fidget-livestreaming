@@ -1,18 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
-import { createStream, listStreams, startStream, stopStream } from '../services/api';
+import { createStream, listMyStreams, listStreams } from '../services/api';
 import ScreenCapture from '../components/streamer/ScreenCapture';
 
 /** RTMP ingest URL — points to the media-server container in dev. */
 const RTMP_URL = 'rtmp://localhost:1935/live';
 
 function Dashboard() {
-  const { user, isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
 
   const [myStreams, setMyStreams] = useState([]);
+  const [liveStreams, setLiveStreams] = useState([]);
   const [title, setTitle] = useState('');
+  const [accessPassword, setAccessPassword] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showKey, setShowKey] = useState({});
@@ -24,55 +26,60 @@ function Dashboard() {
     }
   }, [isAuthenticated, navigate]);
 
-  // Fetch user's streams on mount.
+  // Fetch personal streams and globally live streams on an interval.
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    const fetch = async () => {
-      try {
-        const res = await listStreams();
-        // The API returns all live streams; filter to user's own.
-        // Once the backend supports a /me/streams endpoint we can switch.
-        const mine = (res.data || []).filter(
-          (s) => s.user_id === user?.id,
-        );
-        setMyStreams(mine);
-      } catch {
-        setError('Failed to load your streams.');
-      } finally {
-        setLoading(false);
+    let cancelled = false;
+
+    const fetchStreams = async () => {
+      const [mineResult, liveResult] = await Promise.allSettled([
+        listMyStreams(),
+        listStreams(),
+      ]);
+
+      if (cancelled) return;
+
+      let nextError = '';
+
+      if (mineResult.status === 'fulfilled') {
+        setMyStreams(mineResult.value.data || []);
+      } else {
+        nextError = 'Failed to load your streams.';
       }
+
+      if (liveResult.status === 'fulfilled') {
+        setLiveStreams(liveResult.value.data || []);
+      } else {
+        nextError = nextError
+          ? `${nextError} Failed to load live streams.`
+          : 'Failed to load live streams.';
+      }
+
+      setError(nextError);
+      setLoading(false);
     };
 
-    fetch();
-  }, [isAuthenticated, user]);
+    fetchStreams();
+    const poll = setInterval(fetchStreams, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+    };
+  }, [isAuthenticated]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
     setError('');
+
     try {
-      const res = await createStream(title || 'My Stream');
+      const res = await createStream(title || 'My Stream', accessPassword);
       setMyStreams((prev) => [...prev, res.data]);
       setTitle('');
+      setAccessPassword('');
     } catch (err) {
       setError(err.response?.data?.message || 'Could not create stream.');
-    }
-  };
-
-  const toggleLive = async (stream) => {
-    try {
-      if (stream.is_live) {
-        await stopStream(stream.id);
-      } else {
-        await startStream(stream.id);
-      }
-      setMyStreams((prev) =>
-        prev.map((s) =>
-          s.id === stream.id ? { ...s, is_live: !s.is_live } : s,
-        ),
-      );
-    } catch (err) {
-      setError(err.response?.data?.message || 'Could not update stream status.');
     }
   };
 
@@ -87,7 +94,6 @@ function Dashboard() {
 
       {error && <p className="error-msg mt-1">{error}</p>}
 
-      {/* ── Create a stream ─────────────────────────────────────────── */}
       <div className="dashboard-section mt-2">
         <h3>Create a New Stream</h3>
         <form onSubmit={handleCreate} style={{ display: 'flex', gap: '0.5rem' }}>
@@ -105,11 +111,57 @@ function Dashboard() {
               color: 'var(--color-text)',
             }}
           />
+          <input
+            type="password"
+            placeholder="Optional stream password"
+            value={accessPassword}
+            onChange={(e) => setAccessPassword(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '0.5rem 0.75rem',
+              background: 'var(--color-bg)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius)',
+              color: 'var(--color-text)',
+            }}
+          />
           <button className="btn" type="submit">Create</button>
         </form>
+        <p className="mt-1" style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+          Leave password blank to create a public stream.
+        </p>
       </div>
 
-      {/* ── Create a stream ─────────────────────────────────────────── */}
+      <div className="dashboard-section mt-2">
+        <h3>Live Now (All Users)</h3>
+        {liveStreams.length > 0 ? (
+          <div className="stream-grid" style={{ marginTop: '0.75rem' }}>
+            {liveStreams.map((stream) => (
+              <Link
+                to={`/watch/${stream.id}`}
+                key={stream.id}
+                style={{ textDecoration: 'none', color: 'inherit' }}
+              >
+                <div className="stream-card">
+                  <div className="stream-card__title">
+                    <span className="live-badge">LIVE</span>{' '}
+                    {stream.title || 'Untitled Stream'}
+                  </div>
+                  <div className="stream-card__meta">
+                    {stream.requires_password ? '[LOCKED] ' : ''}
+                    {stream.username || `User #${stream.user_id}`}
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-1" style={{ color: 'var(--color-text-muted)' }}>
+            No active streams right now.
+          </p>
+        )}
+      </div>
+
       {loading && <p className="text-center mt-2">Loading…</p>}
 
       {myStreams.map((stream) => (
@@ -119,7 +171,10 @@ function Dashboard() {
             {stream.is_live && <span className="live-badge">LIVE</span>}
           </h3>
 
-          {/* Stream key */}
+          <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+            Visibility: {stream.requires_password ? 'Password protected' : 'Public'}
+          </p>
+
           <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
             Stream Key
           </p>
@@ -137,7 +192,6 @@ function Dashboard() {
             </button>
           </div>
 
-          {/* OBS instructions */}
           <div className="mt-2" style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
             <p><strong>OBS Setup:</strong></p>
             <ol style={{ paddingLeft: '1.25rem', marginTop: '0.25rem' }}>
@@ -148,19 +202,12 @@ function Dashboard() {
               <li>Click &quot;Start Streaming&quot;</li>
             </ol>
           </div>
-            
-            {/* Screen capture test — preview your screen before going live */}
+
+          <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginTop: '0.75rem' }}>
+            Start and stop your live broadcast from the Screen Capture controls below.
+          </p>
+
           <ScreenCapture streamId={stream.id} />
-          {/* Start / Stop toggle */}
-          <div className="mt-2">
-            <button
-              className={`btn ${stream.is_live ? 'btn--danger' : ''}`}
-              type="button"
-              onClick={() => toggleLive(stream)}
-            >
-              {stream.is_live ? 'Stop Stream' : 'Go Live'}
-            </button>
-          </div>
         </div>
       ))}
 

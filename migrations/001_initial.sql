@@ -14,6 +14,8 @@ CREATE TABLE streams (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     stream_key VARCHAR(255) UNIQUE NOT NULL,
     title VARCHAR(255) NOT NULL DEFAULT 'Untitled Stream',
+    is_public BOOLEAN NOT NULL DEFAULT TRUE,
+    access_password_hash VARCHAR(255),
     is_live BOOLEAN NOT NULL DEFAULT FALSE,
     started_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

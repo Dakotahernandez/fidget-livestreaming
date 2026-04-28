@@ -12,6 +12,9 @@ pub struct Stream {
     pub user_id: Uuid,
     pub stream_key: String,
     pub title: String,
+    pub is_public: bool,
+    #[serde(skip_serializing)]
+    pub access_password_hash: Option<String>,
     pub is_live: bool,
     pub started_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -21,6 +24,7 @@ pub struct Stream {
 #[derive(Debug, Deserialize)]
 pub struct CreateStream {
     pub title: Option<String>,
+    pub access_password: Option<String>,
 }
 
 /// Insert a new stream with a randomly generated key.
@@ -28,19 +32,23 @@ pub async fn create_stream(
     pool: &PgPool,
     user_id: Uuid,
     title: &str,
+    is_public: bool,
+    access_password_hash: Option<&str>,
 ) -> Result<Stream, AppError> {
     let stream_key = format!("live_{}", Uuid::new_v4().simple());
 
     let stream = sqlx::query_as::<_, Stream>(
         r#"
-        INSERT INTO streams (user_id, stream_key, title)
-        VALUES ($1, $2, $3)
-        RETURNING id, user_id, stream_key, title, is_live, started_at, created_at
+        INSERT INTO streams (user_id, stream_key, title, is_public, access_password_hash)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         "#,
     )
     .bind(user_id)
     .bind(&stream_key)
     .bind(title)
+    .bind(is_public)
+    .bind(access_password_hash)
     .fetch_one(pool)
     .await?;
 
@@ -51,12 +59,29 @@ pub async fn create_stream(
 pub async fn list_live_streams(pool: &PgPool) -> Result<Vec<Stream>, AppError> {
     let streams = sqlx::query_as::<_, Stream>(
         r#"
-        SELECT id, user_id, stream_key, title, is_live, started_at, created_at
+        SELECT id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         FROM streams
         WHERE is_live = true
         ORDER BY started_at DESC
         "#,
     )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(streams)
+}
+
+/// Return all streams owned by a user (live and offline).
+pub async fn list_user_streams(pool: &PgPool, user_id: Uuid) -> Result<Vec<Stream>, AppError> {
+    let streams = sqlx::query_as::<_, Stream>(
+        r#"
+        SELECT id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
+        FROM streams
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
 
@@ -70,7 +95,7 @@ pub async fn find_by_stream_key(
 ) -> Result<Option<Stream>, AppError> {
     let stream = sqlx::query_as::<_, Stream>(
         r#"
-        SELECT id, user_id, stream_key, title, is_live, started_at, created_at
+        SELECT id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         FROM streams
         WHERE stream_key = $1
         "#,
@@ -86,7 +111,7 @@ pub async fn find_by_stream_key(
 pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Stream>, AppError> {
     let stream = sqlx::query_as::<_, Stream>(
         r#"
-        SELECT id, user_id, stream_key, title, is_live, started_at, created_at
+        SELECT id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         FROM streams
         WHERE id = $1
         "#,
@@ -105,7 +130,7 @@ pub async fn set_live(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
         UPDATE streams
         SET is_live = true, started_at = NOW()
         WHERE id = $1
-        RETURNING id, user_id, stream_key, title, is_live, started_at, created_at
+        RETURNING id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         "#,
     )
     .bind(id)
@@ -123,7 +148,7 @@ pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
         UPDATE streams
         SET is_live = false, started_at = NULL
         WHERE id = $1
-        RETURNING id, user_id, stream_key, title, is_live, started_at, created_at
+        RETURNING id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         "#,
     )
     .bind(id)

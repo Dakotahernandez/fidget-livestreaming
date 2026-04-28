@@ -12,6 +12,10 @@ export default defineConfig({
         target: 'http://backend:8080',
         changeOrigin: true,
       },
+      '/hls': {
+        target: 'http://localhost:8088',
+        changeOrigin: true,
+      },
     },
   },
   define: {

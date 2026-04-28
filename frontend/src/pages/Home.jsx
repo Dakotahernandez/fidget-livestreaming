@@ -15,6 +15,7 @@ function Home() {
         const res = await listStreams();
         if (!cancelled) {
           setStreams(res.data);
+          setError('');
         }
       } catch (err) {
         if (!cancelled) {
@@ -28,7 +29,13 @@ function Home() {
     };
 
     fetchStreams();
-    return () => { cancelled = true; };
+
+    const poll = setInterval(fetchStreams, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+    };
   }, []);
 
   return (
@@ -57,6 +64,7 @@ function Home() {
                 {stream.title || 'Untitled Stream'}
               </div>
               <div className="stream-card__meta">
+                {stream.requires_password ? '[LOCKED] ' : ''}
                 {stream.username || `User #${stream.user_id}`}
               </div>
             </div>

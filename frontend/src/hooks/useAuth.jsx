@@ -1,40 +1,32 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { login as apiLogin, register as apiRegister } from '../services/api';
+import {
+  clearStoredAuth,
+  getStoredToken,
+  getStoredUser,
+  setStoredToken,
+  setStoredUser,
+} from '../services/authStorage';
 
 const AuthContext = createContext(null);
 
 /**
  * Provides authentication state and helpers to the component tree.
  *
- * Stores the JWT in localStorage and exposes login / register / logout
+ * Stores auth state in tab-scoped storage and exposes login / register / logout
  * functions so pages don't need to interact with the API layer directly.
  */
 export function AuthProvider({ children }) {
-  const [token, setToken] = useState(() => localStorage.getItem('token'));
-  const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem('user');
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [token, setToken] = useState(() => getStoredToken());
+  const [user, setUser] = useState(() => getStoredUser());
 
-  // Keep localStorage in sync whenever token or user changes.
+  // Keep tab-scoped storage in sync whenever token or user changes.
   useEffect(() => {
-    if (token) {
-      localStorage.setItem('token', token);
-    } else {
-      localStorage.removeItem('token');
-    }
+    setStoredToken(token);
   }, [token]);
 
   useEffect(() => {
-    if (user) {
-      localStorage.setItem('user', JSON.stringify(user));
-    } else {
-      localStorage.removeItem('user');
-    }
+    setStoredUser(user);
   }, [user]);
 
   const loginUser = useCallback(async (username, password) => {
@@ -54,6 +46,7 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     setToken(null);
     setUser(null);
+    clearStoredAuth();
   }, []);
 
   const value = {

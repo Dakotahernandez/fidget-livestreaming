@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -15,20 +16,54 @@ use crate::models::stream::{self, CreateStream};
 
 /// Build the streams sub-router.
 ///
-/// Public routes (no auth): list live streams, get stream details.
-/// Protected routes (auth required): create, start, stop.
+/// Public routes: list live streams, get stream details, and join a stream.
+/// Protected routes: create streams, list own streams, and force start/stop.
 pub fn router() -> Router<(PgPool, Config)> {
     let public = Router::new()
         .route("/", get(list_streams))
-        .route("/:id", get(get_stream));
+        .route("/:id", get(get_stream))
+        .route("/:id/join", post(join_stream));
 
     let protected = Router::new()
         .route("/", post(create))
+        .route("/me", get(list_my_streams))
         .route("/:id/start", put(start))
         .route("/:id/stop", put(stop))
         .layer(axum_mw::from_fn(require_auth));
 
     public.merge(protected)
+}
+
+#[derive(Debug, Deserialize)]
+struct JoinStreamRequest {
+    password: Option<String>,
+}
+
+/// `GET /api/streams/me` — list all streams for the authenticated user.
+async fn list_my_streams(
+    State((pool, _config)): State<(PgPool, Config)>,
+    Extension(auth): Extension<AuthUser>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    let streams = stream::list_user_streams(&pool, auth.user_id).await?;
+
+    let payload: Vec<Value> = streams
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "user_id": s.user_id,
+                "stream_key": s.stream_key,
+                "title": s.title,
+                "is_public": s.is_public,
+                "requires_password": !s.is_public,
+                "is_live": s.is_live,
+                "started_at": s.started_at,
+                "created_at": s.created_at,
+            })
+        })
+        .collect();
+
+    Ok(Json(payload))
 }
 
 /// `GET /api/streams` — list all live streams.
@@ -44,6 +79,8 @@ async fn list_streams(
                 "id": s.id,
                 "user_id": s.user_id,
                 "title": s.title,
+                "is_public": s.is_public,
+                "requires_password": !s.is_public,
                 "is_live": s.is_live,
                 "started_at": s.started_at,
             })
@@ -53,7 +90,7 @@ async fn list_streams(
     Ok(Json(payload))
 }
 
-/// `GET /api/streams/:id` — get stream details (including stream_key for the owner).
+/// `GET /api/streams/:id` — get stream details for watch page metadata.
 async fn get_stream(
     State((pool, _config)): State<(PgPool, Config)>,
     Path(id): Path<Uuid>,
@@ -65,11 +102,45 @@ async fn get_stream(
     Ok(Json(serde_json::json!({
         "id": s.id,
         "user_id": s.user_id,
-        "stream_key": s.stream_key,
         "title": s.title,
+        "is_public": s.is_public,
+        "requires_password": !s.is_public,
         "is_live": s.is_live,
         "started_at": s.started_at,
         "created_at": s.created_at,
+    })))
+}
+
+/// `POST /api/streams/:id/join` — validate stream access and return playable HLS URL.
+async fn join_stream(
+    State((pool, _config)): State<(PgPool, Config)>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<JoinStreamRequest>,
+) -> Result<Json<Value>, AppError> {
+    let s = stream::find_by_id(&pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("stream not found".to_string()))?;
+
+    if !s.is_public {
+        let submitted = body.password.unwrap_or_default();
+        let hash = s
+            .access_password_hash
+            .as_deref()
+            .ok_or_else(|| AppError::Unauthorized("this stream is locked".to_string()))?;
+
+        let valid = bcrypt::verify(&submitted, hash)
+            .map_err(|_| AppError::Internal("failed to verify stream password".to_string()))?;
+
+        if !valid {
+            return Err(AppError::Unauthorized("invalid stream password".to_string()));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": s.id,
+        "title": s.title,
+        "is_live": s.is_live,
+        "hls_url": format!("/hls/{}/index.m3u8", s.stream_key),
     })))
 }
 
@@ -80,13 +151,32 @@ async fn create(
     Json(body): Json<CreateStream>,
 ) -> Result<Json<Value>, AppError> {
     let title = body.title.as_deref().unwrap_or("Untitled Stream");
-    let s = stream::create_stream(&pool, auth.user_id, title).await?;
+    let access_password = body.access_password.unwrap_or_default();
+
+    let password_hash = if access_password.trim().is_empty() {
+        None
+    } else {
+        Some(bcrypt::hash(&access_password, bcrypt::DEFAULT_COST)?)
+    };
+
+    let is_public = password_hash.is_none();
+
+    let s = stream::create_stream(
+        &pool,
+        auth.user_id,
+        title,
+        is_public,
+        password_hash.as_deref(),
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "id": s.id,
         "user_id": s.user_id,
         "stream_key": s.stream_key,
         "title": s.title,
+        "is_public": s.is_public,
+        "requires_password": !s.is_public,
         "is_live": s.is_live,
         "created_at": s.created_at,
     })))

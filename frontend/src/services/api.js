@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clearStoredAuth, getStoredToken } from './authStorage';
 
 const api = axios.create({
   baseURL: '/api',
@@ -7,7 +8,7 @@ const api = axios.create({
 // ── JWT interceptor ──────────────────────────────────────────────────
 // Attach the stored token to every outgoing request automatically.
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
+  const token = getStoredToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -20,7 +21,7 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response && error.response.status === 401) {
-      localStorage.removeItem('token');
+      clearStoredAuth();
     }
     return Promise.reject(error);
   },
@@ -34,14 +35,23 @@ export const login = (username, password) =>
   api.post('/auth/login', { username, password });
 
 // ── Stream endpoints ─────────────────────────────────────────────────
-export const createStream = (title) =>
-  api.post('/streams', { title });
+export const createStream = (title, accessPassword = '') =>
+  api.post('/streams', {
+    title,
+    access_password: accessPassword,
+  });
 
 export const listStreams = () =>
   api.get('/streams');
 
+export const listMyStreams = () =>
+  api.get('/streams/me');
+
 export const getStream = (id) =>
   api.get(`/streams/${id}`);
+
+export const joinStream = (id, password = '') =>
+  api.post(`/streams/${id}/join`, { password });
 
 export const startStream = (id) =>
   api.put(`/streams/${id}/start`);
@@ -53,16 +63,10 @@ export const getCertHash = () =>
   api.get('/transport/cert-hash');
 
 export const getTransportUrl = (streamId) => {
-  const token = localStorage.getItem('token');
+  const token = getStoredToken();
   const host = window.location.hostname;
   const quicPort = 4443;
   return `https://${host}:${quicPort}/ingest/${streamId}?token=${token}`;
-};
-
-export const getHlsUrl = (streamKey) => {
-  const host = window.location.hostname;
-  const edgePort = 8090;
-  return `http://${host}:${edgePort}/hls/${streamKey}/index.m3u8`;
 };
 
 export default api;
