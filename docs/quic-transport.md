@@ -47,6 +47,8 @@ Key advantages over raw UDP:
 
 [WebTransport](https://www.w3.org/TR/webtransport/) is a browser API that exposes QUIC features — including unreliable datagrams — to JavaScript. It runs over HTTP/3 and is supported in Chrome 97+, Edge 97+, and Firefox 114+.
 
+For the actual implementation in this project, the frontend uses the browser's built-in `WebTransport` API, and the Rust backend uses the [`wtransport`](https://crates.io/crates/wtransport) crate. `wtransport` is the QUIC/WebTransport library that accepts the session, receives QUIC datagrams, and manages the TLS certificate used by our ingest server.
+
 ### Data flow
 
 ```mermaid
@@ -152,6 +154,7 @@ With QUIC datagrams:
 ### Backend (Rust)
 
 - **Crate:** [`wtransport`](https://crates.io/crates/wtransport) v0.7 with `self-signed` feature
+- **Role of the crate:** `wtransport` is the Rust library we use to implement the server side of QUIC + WebTransport, including session acceptance, unreliable datagram receive, and certificate handling
 - **Identity:** `Identity::self_signed(["localhost", "127.0.0.1", "::1"])` generates a TLS certificate trusted by the browser via hash pinning
 - **Port:** UDP 4443 (configurable via `QUIC_PORT` env var)
 - **Auth:** JWT token passed in the WebTransport URL query string, validated before accepting the session
