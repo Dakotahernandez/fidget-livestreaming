@@ -8,6 +8,7 @@ const WEBCAM_SCALE = 0.25;
 const STREAM_TIMESLICE_MS = 250;
 const FRAGMENT_HEADER_SIZE = 8;
 const MAX_DATAGRAM_PAYLOAD = 1200;
+const WEBTRANSPORT_UNSUPPORTED_MESSAGE = 'Live streaming requires WebTransport. Safari does not support it yet, so use Chrome or Edge to go live.';
 
 function ScreenCapture({ streamId }) {
   const canvasRef = useRef(null);
@@ -35,6 +36,8 @@ function ScreenCapture({ streamId }) {
 
   const webcamOnRef = useRef(false);
   useEffect(() => { webcamOnRef.current = webcamOn; }, [webcamOn]);
+
+  const webTransportSupported = typeof globalThis.WebTransport === 'function';
 
   const drawComposite = useCallback(() => {
     const canvas = canvasRef.current;
@@ -284,6 +287,12 @@ function ScreenCapture({ streamId }) {
     if (!compositeStreamRef.current || !streamId) return;
     setError(null);
 
+    if (!webTransportSupported) {
+      setError(WEBTRANSPORT_UNSUPPORTED_MESSAGE);
+      setIsStreaming(false);
+      return;
+    }
+
     try {
       const { data } = await getCertHash();
       const hashBytes = new Uint8Array(
@@ -338,7 +347,7 @@ function ScreenCapture({ streamId }) {
       setError(`WebTransport connection failed: ${err.message}`);
       setIsStreaming(false);
     }
-  }, [streamId, sendChunkAsDatagrams]);
+  }, [streamId, sendChunkAsDatagrams, webTransportSupported]);
 
   const stopStreaming = useCallback(() => {
     if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
@@ -379,6 +388,11 @@ function ScreenCapture({ streamId }) {
       </p>
 
       {error && <p className="error-msg">{error}</p>}
+      {!webTransportSupported && (
+        <p style={{ fontSize: '0.85rem', color: 'var(--color-warning)', marginBottom: '0.75rem' }}>
+          {WEBTRANSPORT_UNSUPPORTED_MESSAGE}
+        </p>
+      )}
 
       <video ref={screenVideoRef} autoPlay muted playsInline style={{ display: 'none' }} />
       <video ref={webcamVideoRef} autoPlay muted playsInline style={{ display: 'none' }} />
@@ -424,6 +438,7 @@ function ScreenCapture({ streamId }) {
             {streamId && (
               !isStreaming ? (
                 <button className="btn" type="button" onClick={startStreaming}
+                  disabled={!webTransportSupported}
                   style={{ background: '#e63946', color: '#fff', fontWeight: 700 }}>
                   ● Go Live
                 </button>
