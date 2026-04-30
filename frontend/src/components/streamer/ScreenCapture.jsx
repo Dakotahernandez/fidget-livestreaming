@@ -17,18 +17,14 @@ function ScreenCapture({ streamId }) {
   const canvasRef = useRef(null);
   const screenVideoRef = useRef(null);
   const webcamVideoRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
   const screenStreamRef = useRef(null);
   const webcamStreamRef = useRef(null);
   const compositeStreamRef = useRef(null);
   const drawIntervalRef = useRef(null);
-  const chunksRef = useRef([]);
 
   const [isCapturing, setIsCapturing] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [webcamOn, setWebcamOn] = useState(false);
-  const [recordings, setRecordings] = useState([]);
   const [error, setError] = useState(null);
 
   const wsRef = useRef(null);
@@ -141,9 +137,6 @@ function ScreenCapture({ streamId }) {
       clearInterval(drawIntervalRef.current);
       drawIntervalRef.current = null;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
     if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
       streamRecorderRef.current.stop();
     }
@@ -173,7 +166,6 @@ function ScreenCapture({ streamId }) {
     if (webcamVideoRef.current) webcamVideoRef.current.srcObject = null;
 
     setIsCapturing(false);
-    setIsRecording(false);
     setIsStreaming(false);
     setWebcamOn(false);
   }, []);
@@ -209,51 +201,6 @@ function ScreenCapture({ streamId }) {
       }
     }
   }, [webcamOn]);
-
-  const startRecording = useCallback(() => {
-    if (!compositeStreamRef.current) return;
-
-    chunksRef.current = [];
-    const recorder = new MediaRecorder(compositeStreamRef.current, { mimeType: MIME_TYPE });
-
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        chunksRef.current.push(e.data);
-      }
-    };
-
-    recorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: MIME_TYPE });
-      const url = URL.createObjectURL(blob);
-      const timestamp = new Date().toLocaleTimeString();
-      setRecordings((prev) => [...prev, { url, blob, timestamp, id: Date.now() }]);
-      chunksRef.current = [];
-    };
-
-    recorder.start(1000);
-    mediaRecorderRef.current = recorder;
-    setIsRecording(true);
-  }, []);
-
-  const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-    setIsRecording(false);
-  }, []);
-
-  const deleteRecording = useCallback((id) => {
-    setRecordings((prev) => {
-      const target = prev.find((r) => r.id === id);
-      if (target) URL.revokeObjectURL(target.url);
-      return prev.filter((r) => r.id !== id);
-    });
-  }, []);
-
-  const deleteAllRecordings = useCallback(() => {
-    recordings.forEach((r) => URL.revokeObjectURL(r.url));
-    setRecordings([]);
-  }, [recordings]);
 
   const sendChunkAsDatagrams = useCallback(async (arrayBuffer) => {
     const writer = datagramWriterRef.current;
@@ -387,7 +334,7 @@ function ScreenCapture({ streamId }) {
       <h4 style={{ marginBottom: '0.5rem' }}>Screen Capture Preview</h4>
       <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '0.75rem' }}>
         Test your screen, window, or game capture before going live. Toggle webcam to overlay your
-        camera in the top-right corner. Recordings are composited — what you see is what gets recorded.
+        camera in the top-right corner.
       </p>
 
       {error && <p className="error-msg">{error}</p>}
@@ -427,19 +374,7 @@ function ScreenCapture({ streamId }) {
             >
               {webcamOn ? 'Webcam Off' : 'Webcam On'}
             </button>
-            {!isRecording ? (
-              <button className="btn" type="button" onClick={startRecording}
-                style={{ background: 'var(--color-success)', color: 'var(--color-text-inverse)' }}>
-                Record
-              </button>
-            ) : (
-              <button className="btn" type="button" onClick={stopRecording}
-                style={{ background: 'var(--color-warning)', color: 'var(--color-text-inverse)' }}>
-                Stop Recording
-              </button>
-            )}
-            {streamId && (
-              !isStreaming ? (
+            {streamId && (              !isStreaming ? (
                 <button className="btn" type="button" onClick={startStreaming}
                   disabled={!webTransportSupported}
                   style={{ background: '#e63946', color: '#fff', fontWeight: 700 }}>
@@ -456,43 +391,8 @@ function ScreenCapture({ streamId }) {
         )}
       </div>
 
-      {isRecording && (
-        <p style={{ color: 'var(--color-danger)', fontWeight: 700 }}>● Recording...</p>
-      )}
-
       {isStreaming && (
         <p style={{ color: '#e63946', fontWeight: 700 }}>● LIVE — streaming to server</p>
-      )}
-
-      {recordings.length > 0 && (
-        <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem', marginTop: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-            <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>Recordings ({recordings.length})</span>
-            <button className="btn btn--danger" type="button" onClick={deleteAllRecordings}
-              style={{ padding: '0.3rem 0.75rem', fontSize: '0.8rem' }}>
-              Delete All
-            </button>
-          </div>
-          {recordings.map((rec) => (
-            <div key={rec.id} style={{
-              background: 'var(--color-bg)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius)',
-              padding: '0.75rem',
-              marginBottom: '0.5rem',
-            }}>
-              <video src={rec.url} controls style={{ width: '100%', borderRadius: 'var(--radius)', marginBottom: '0.5rem' }} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-                <span>{rec.timestamp}</span>
-                <span>{(rec.blob.size / (1024 * 1024)).toFixed(1)} MB</span>
-                <button className="btn btn--danger" type="button" onClick={() => deleteRecording(rec.id)}
-                  style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}>
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
       )}
     </div>
   );

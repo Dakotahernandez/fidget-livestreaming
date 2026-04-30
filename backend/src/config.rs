@@ -16,7 +16,7 @@ impl Config {
         let jwt_secret = env::var("JWT_SECRET")
             .map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
         let rtmp_url = env::var("RTMP_URL")
-            .unwrap_or_else(|_| "rtmp://16.59.136.241/live".to_string());
+            .unwrap_or_else(|_| "rtmp://media-server:1935/live".to_string());
         let quic_port: u16 = env::var("QUIC_PORT")
             .unwrap_or_else(|_| "4443".to_string())
             .parse()
