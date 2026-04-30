@@ -6,6 +6,7 @@ pub struct Config {
     pub jwt_secret: String,
     pub rtmp_url: String,
     pub quic_port: u16,
+    pub cloudfront_url: String
 }
 
 impl Config {
@@ -15,17 +16,19 @@ impl Config {
         let jwt_secret = env::var("JWT_SECRET")
             .map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
         let rtmp_url = env::var("RTMP_URL")
-            .unwrap_or_else(|_| "rtmp://media-server:1935/live".to_string());
+            .unwrap_or_else(|_| "rtmp://16.59.136.241/live".to_string());
         let quic_port: u16 = env::var("QUIC_PORT")
             .unwrap_or_else(|_| "4443".to_string())
             .parse()
             .unwrap_or(4443);
-
+        let cloudfront_url = env::var("CLOUDFRONT_DOMAIN")
+            .unwrap_or_else(|_| "https://d1wp4v4rt1bxg5.cloudfront.net".to_string());
         Ok(Self {
             database_url,
             jwt_secret,
             rtmp_url,
             quic_port,
+            cloudfront_url,
         })
     }
 }
