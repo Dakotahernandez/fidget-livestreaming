@@ -156,13 +156,29 @@ function Watch() {
         maxMaxBufferLength: 4,
         backBufferLength: 4,
         maxLiveSyncPlaybackRate: 1.5,
+        // SRS doesn't emit a CODECS attribute in its master playlist, so
+        // pin AAC LC explicitly. Without this, hls.js may guess HE-AAC
+        // (mp4a.40.5) and Chromium's MSE rejects the source buffer with
+        // "audio decoder initialization failed: kUnsupportedConfig".
+        defaultAudioCodec: 'mp4a.40.2',
       });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) {
-          setPlayerError('Stream is not available yet. Waiting for the broadcaster...');
+        if (!data.fatal) return;
+        // Try to recover from network/media errors before giving up — some
+        // embedded browsers reject specific AAC configs but can keep playing
+        // video if we re-init the source buffer.
+        switch (data.type) {
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            hls.startLoad();
+            return;
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            hls.recoverMediaError();
+            return;
+          default:
+            setPlayerError('Stream is not available yet. Waiting for the broadcaster...');
         }
       });
 

@@ -6,11 +6,8 @@ const CANVAS_FPS = 30;
 const DRAW_INTERVAL_MS = Math.round(1000 / CANVAS_FPS);
 const WEBCAM_SCALE = 0.25;
 // Smaller timeslices = each MediaRecorder chunk is dispatched sooner, which
-// directly lowers glass-to-glass latency. 100ms keeps WebM clusters small
-// without overwhelming datagram fragmentation.
+// directly lowers glass-to-glass latency. 100ms keeps WebM clusters small.
 const STREAM_TIMESLICE_MS = 100;
-const FRAGMENT_HEADER_SIZE = 8;
-const MAX_DATAGRAM_PAYLOAD = 1200;
 const WEBTRANSPORT_UNSUPPORTED_MESSAGE = 'Live streaming requires WebTransport. Safari does not support it yet, so use Chrome or Edge to go live.';
 
 function ScreenCapture({ streamId }) {
@@ -29,8 +26,7 @@ function ScreenCapture({ streamId }) {
 
   const wsRef = useRef(null);
   const transportRef = useRef(null);
-  const datagramWriterRef = useRef(null);
-  const chunkIdRef = useRef(0);
+  const streamWriterRef = useRef(null);
   const streamRecorderRef = useRef(null);
 
   const webcamOnRef = useRef(false);
@@ -141,9 +137,9 @@ function ScreenCapture({ streamId }) {
       streamRecorderRef.current.stop();
     }
     streamRecorderRef.current = null;
-    if (datagramWriterRef.current) {
-      datagramWriterRef.current.close();
-      datagramWriterRef.current = null;
+    if (streamWriterRef.current) {
+      streamWriterRef.current.close().catch(() => {});
+      streamWriterRef.current = null;
     }
     if (transportRef.current) {
       transportRef.current.close();
@@ -202,33 +198,19 @@ function ScreenCapture({ streamId }) {
     }
   }, [webcamOn]);
 
-  const sendChunkAsDatagrams = useCallback(async (arrayBuffer) => {
-    const writer = datagramWriterRef.current;
+  const sendChunkOverStream = useCallback(async (arrayBuffer) => {
+    const writer = streamWriterRef.current;
     if (!writer) return;
 
-    const chunkId = chunkIdRef.current;
-    chunkIdRef.current = (chunkIdRef.current + 1) & 0xFFFFFFFF;
-
-    const data = new Uint8Array(arrayBuffer);
-    const fragPayload = MAX_DATAGRAM_PAYLOAD - FRAGMENT_HEADER_SIZE;
-    const fragTotal = Math.ceil(data.length / fragPayload) || 1;
-
-    for (let i = 0; i < fragTotal; i++) {
-      const offset = i * fragPayload;
-      const slice = data.subarray(offset, offset + fragPayload);
-      const dgram = new Uint8Array(FRAGMENT_HEADER_SIZE + slice.length);
-
-      const view = new DataView(dgram.buffer);
-      view.setUint32(0, chunkId, false);
-      view.setUint16(4, i, false);
-      view.setUint16(6, fragTotal, false);
-
-      dgram.set(slice, FRAGMENT_HEADER_SIZE);
-
-      try {
-        await writer.write(dgram);
-      } catch {
-        return;
+    try {
+      await writer.write(new Uint8Array(arrayBuffer));
+    } catch (err) {
+      console.error('[stream] writer.write failed:', err);
+      setError(`Stream send failed: ${err.message || err}. Click Go Live to reconnect.`);
+      const t = transportRef.current;
+      if (t) {
+        try { t.close(); } catch { /* ignore */ }
+        transportRef.current = null;
       }
     }
   }, []);
@@ -241,6 +223,23 @@ function ScreenCapture({ streamId }) {
       setError(WEBTRANSPORT_UNSUPPORTED_MESSAGE);
       setIsStreaming(false);
       return;
+    }
+
+    // Tear down any leftover recorder/transport from a previous session.
+    // If we don't, the old MediaRecorder keeps emitting mid-stream WebM
+    // clusters (no EBML header) into the new writer, which makes ffmpeg
+    // fail with "EBML header parsing failed" on the new session.
+    if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
+      try { streamRecorderRef.current.stop(); } catch { /* ignore */ }
+    }
+    streamRecorderRef.current = null;
+    if (streamWriterRef.current) {
+      try { streamWriterRef.current.close(); } catch { /* ignore */ }
+      streamWriterRef.current = null;
+    }
+    if (transportRef.current) {
+      try { transportRef.current.close(); } catch { /* ignore */ }
+      transportRef.current = null;
     }
 
     try {
@@ -259,24 +258,63 @@ function ScreenCapture({ streamId }) {
       await transport.ready;
       transportRef.current = transport;
 
-      const writer = transport.datagrams.writable.getWriter();
-      datagramWriterRef.current = writer;
-      chunkIdRef.current = 0;
+      // Use a single unidirectional stream instead of datagrams. Datagrams
+      // are unreliable and have flaky cross-browser support (Firefox in
+      // particular silently drops them on many network paths). A single
+      // ordered byte stream gives us reliable in-order WebM delivery and
+      // removes the entire fragmentation/reassembly path.
+      const wtStream = await transport.createUnidirectionalStream();
+      const writer = wtStream.getWriter();
+      streamWriterRef.current = writer;
+      console.log('[stream] unidirectional stream opened');
+
+      // Prime the stream with a 1-byte write so the QUIC STREAM frame
+      // actually goes on the wire immediately. Without this, browsers
+      // create the stream object locally but defer the on-wire STREAM frame
+      // until the first MediaRecorder chunk arrives (~100ms later), and the
+      // backend's accept_uni() can stall if MediaRecorder ever fails to
+      // produce data. The byte is a WebM-safe leading zero that ffmpeg's
+      // EBML parser ignores before the real header.
+      try {
+        await writer.write(new Uint8Array([0x00]));
+        console.log('[stream] priming byte sent');
+      } catch (err) {
+        console.error('[stream] failed to send priming byte:', err);
+        setError(`Stream priming failed: ${err.message || err}`);
+        try { transport.close(); } catch { /* ignore */ }
+        transportRef.current = null;
+        streamWriterRef.current = null;
+        setIsStreaming(false);
+        return;
+      }
 
       const recorder = new MediaRecorder(compositeStreamRef.current, {
         mimeType: MIME_TYPE,
       });
 
+      // Serialize sends so chunk N+1 never beats chunk N to the wire.
+      let sendChain = Promise.resolve();
+      let chunkCount = 0;
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0 && transportRef.current) {
-          e.data.arrayBuffer().then((buf) => sendChunkAsDatagrams(buf));
+          sendChain = sendChain.then(() =>
+            e.data.arrayBuffer().then((buf) => {
+              if (chunkCount === 0) {
+                console.log(`[stream] sending first chunk size=${buf.byteLength}`);
+              }
+              chunkCount += 1;
+              return sendChunkOverStream(buf);
+            })
+          ).catch((err) => {
+            console.error('[stream] send chain error:', err);
+          });
         }
       };
 
       recorder.onstop = () => {
-        if (datagramWriterRef.current) {
-          datagramWriterRef.current.close();
-          datagramWriterRef.current = null;
+        if (streamWriterRef.current) {
+          streamWriterRef.current.close().catch(() => {});
+          streamWriterRef.current = null;
         }
         if (transportRef.current) {
           transportRef.current.close();
@@ -288,25 +326,33 @@ function ScreenCapture({ streamId }) {
       streamRecorderRef.current = recorder;
       setIsStreaming(true);
 
-      transport.closed.then(() => {
+      const onClosed = () => {
+        // Stop the recorder so its still-running ondataavailable handlers
+        // don't keep firing into a stale writer when the user clicks Go Live
+        // again.
+        if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
+          try { streamRecorderRef.current.stop(); } catch { /* ignore */ }
+        }
+        streamRecorderRef.current = null;
+        streamWriterRef.current = null;
+        transportRef.current = null;
         setIsStreaming(false);
-      }).catch(() => {
-        setIsStreaming(false);
-      });
+      };
+      transport.closed.then(onClosed).catch(onClosed);
     } catch (err) {
       setError(`WebTransport connection failed: ${err.message}`);
       setIsStreaming(false);
     }
-  }, [streamId, sendChunkAsDatagrams, webTransportSupported]);
+  }, [streamId, sendChunkOverStream, webTransportSupported]);
 
   const stopStreaming = useCallback(() => {
     if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
       streamRecorderRef.current.stop();
     }
     streamRecorderRef.current = null;
-    if (datagramWriterRef.current) {
-      datagramWriterRef.current.close();
-      datagramWriterRef.current = null;
+    if (streamWriterRef.current) {
+      streamWriterRef.current.close().catch(() => {});
+      streamWriterRef.current = null;
     }
     if (transportRef.current) {
       transportRef.current.close();
@@ -323,7 +369,7 @@ function ScreenCapture({ streamId }) {
       if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
         streamRecorderRef.current.stop();
       }
-      if (datagramWriterRef.current) datagramWriterRef.current.close();
+      if (streamWriterRef.current) streamWriterRef.current.close().catch(() => {});
       if (transportRef.current) transportRef.current.close();
       if (wsRef.current) wsRef.current.close();
     };

@@ -1,5 +1,4 @@
 use sqlx::PgPool;
-use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
@@ -8,15 +7,10 @@ use wtransport::{Endpoint, Identity, ServerConfig};
 use crate::middleware::auth::Claims;
 use crate::models::stream;
 
-/// QUIC datagram fragment header size in bytes.
-///
-/// Layout: `[chunk_id: u32][frag_index: u16][frag_total: u16]`
-const FRAGMENT_HEADER_SIZE: usize = 8;
-
-/// If a chunk hasn't been fully rebuilt after receiving a newer chunk_id,
-/// drop the oldest. Keeps memory bounded while tolerating brief reordering of
-/// browser-side datagram bursts. The right value depends on the chunk size i think + network condiitions.
-const MAX_PENDING_CHUNKS: usize = 8;
+/// Read buffer size for the WebTransport unidirectional stream that carries
+/// the WebM byte stream from the browser. Sized to comfortably hold a
+/// MediaRecorder timeslice (~100ms of VP8/Opus) without excessive syscalls.
+const STREAM_READ_BUF: usize = 64 * 1024;
 
 /// Start the QUIC/WebTransport ingest server and return the SHA-256 cert hash.
 ///
@@ -186,8 +180,9 @@ async fn handle_session(
     tracing::info!("Starting ffmpeg ingest for stream {stream_id} → {destination}");
 
     // Spawn ffmpeg: read WebM from stdin → transcode to H.264/AAC → push RTMP.
-    // `-f webm` + tiny `-probesize`/`-analyzeduration` skips ffmpeg's input probe
-    // phase, which otherwise buffers ~5s of input before producing any output.
+    // Probe sizes are kept small but large enough to fit the WebM EBML header
+    // (~1KB). 32 bytes was too small and caused ffmpeg to hang waiting for
+    // a parseable header that never fit in the probe buffer.
     let ffmpeg_result = Command::new("ffmpeg")
         .args([
             "-fflags",
@@ -195,9 +190,9 @@ async fn handle_session(
             "-flags",
             "low_delay",
             "-probesize",
-            "32",
+            "32K",
             "-analyzeduration",
-            "0",
+            "100000",
             "-f",
             "webm",
             "-i",
@@ -218,6 +213,16 @@ async fn handle_session(
             "expr:gte(t,n_forced*1)",
             "-c:a",
             "aac",
+            // Pin profile + sample rate + channels so Chromium's MSE AAC
+            // decoder doesn't reject the stream with kUnsupportedConfig.
+            // Browser AudioContext + MediaRecorder can produce variable
+            // configs; normalising here gives the player a known-good shape.
+            "-profile:a",
+            "aac_low",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
             "-b:a",
             "128k",
             "-f",
@@ -255,63 +260,122 @@ async fn handle_session(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(stream_id = %stream_id, "ffmpeg: {line}");
+                tracing::info!(stream_id = %stream_id, "ffmpeg: {line}");
             }
         });
     }
 
-    // Fragment reassembly state.
-    // Key: chunk_id, Value: (total_fragments, received fragments indexed by position).
-    let mut pending: HashMap<u32, (u16, HashMap<u16, Vec<u8>>)> = HashMap::new();
+    // Fragment reassembly state removed: we now use a single ordered
+    // unidirectional WebTransport stream that delivers the WebM byte stream
+    // in order. This eliminates the cross-browser flakiness of QUIC
+    // datagrams (Firefox in particular silently drops them on many paths).
+    let mut total_bytes_written: u64 = 0;
+    let mut reads: u64 = 0;
 
-    // Receive QUIC datagrams until the connection closes.
+    tracing::info!(stream_id = %stream_id, "Waiting for unidirectional WebTransport stream");
+
+    let mut recv_stream = match connection.accept_uni().await {
+        Ok(s) => {
+            tracing::info!(stream_id = %stream_id, "Unidirectional stream accepted, entering read loop");
+            s
+        }
+        Err(e) => {
+            tracing::warn!(stream_id = %stream_id, "Failed to accept unidirectional stream: {e}");
+            drop(stdin);
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stream::set_offline(&pool, stream_id).await;
+            return;
+        }
+    };
+
+    let mut buf = vec![0u8; STREAM_READ_BUF];
+    // The browser sends a 1-byte priming write so the QUIC STREAM frame
+    // hits the wire immediately; otherwise streams open lazily and the
+    // backend's accept_uni() can stall waiting for the first MediaRecorder
+    // chunk. We must skip everything until we see the WebM EBML magic
+    // (0x1A 0x45 0xDF 0xA3) so the priming byte (and any other client
+    // preamble) does not corrupt ffmpeg's input.
+    const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+    let mut header_seen = false;
+    let mut prefix: Vec<u8> = Vec::with_capacity(8);
+
     loop {
-        match connection.receive_datagram().await {
-            Ok(datagram) => {
-                let data = datagram.as_ref();
-                if data.len() < FRAGMENT_HEADER_SIZE {
-                    continue;
+        match recv_stream.read(&mut buf).await {
+            Ok(Some(0)) | Ok(None) => {
+                tracing::info!(stream_id = %stream_id, "WebTransport stream ended (EOF)");
+                break;
+            }
+            Ok(Some(n)) => {
+                reads += 1;
+                total_bytes_written += n as u64;
+                if reads == 1 || reads.is_multiple_of(50) {
+                    tracing::info!(
+                        stream_id = %stream_id,
+                        reads,
+                        bytes = total_bytes_written,
+                        header_seen,
+                        "Read bytes from WT stream"
+                    );
                 }
 
-                let chunk_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                let frag_index = u16::from_be_bytes([data[4], data[5]]);
-                let frag_total = u16::from_be_bytes([data[6], data[7]]);
-                let payload = &data[FRAGMENT_HEADER_SIZE..];
-
-                let entry = pending
-                    .entry(chunk_id)
-                    .or_insert_with(|| (frag_total, HashMap::new()));
-
-                entry.1.insert(frag_index, payload.to_vec());
-
-                // Check if all fragments have arrived for this chunk.
-                if entry.1.len() == frag_total as usize {
-                    // Reassemble in order.
-                    let mut assembled = Vec::new();
-                    for i in 0..frag_total {
-                        if let Some(frag) = entry.1.get(&i) {
-                            assembled.extend_from_slice(frag);
+                let payload: &[u8] = if header_seen {
+                    &buf[..n]
+                } else {
+                    // Append to prefix and search for EBML magic.
+                    prefix.extend_from_slice(&buf[..n]);
+                    match prefix.windows(4).position(|w| w == EBML_MAGIC) {
+                        Some(idx) => {
+                            header_seen = true;
+                            tracing::info!(
+                                stream_id = %stream_id,
+                                skipped = idx,
+                                "EBML header found, starting ffmpeg feed"
+                            );
+                            // Move past skipped bytes; everything from idx
+                            // onwards is the real WebM stream.
+                            let stripped = prefix.split_off(idx);
+                            // Replace prefix with stripped so future writes
+                            // (none expected here) won't double-feed.
+                            prefix = Vec::new();
+                            // Use stripped as this iteration's payload.
+                            if let Err(e) = stdin.write_all(&stripped).await {
+                                tracing::error!("ffmpeg write error for stream {stream_id}: {e}");
+                                break;
+                            }
+                            if let Err(e) = stdin.flush().await {
+                                tracing::error!("ffmpeg flush error for stream {stream_id}: {e}");
+                                break;
+                            }
+                            continue;
+                        }
+                        None => {
+                            // Not enough data yet to find EBML magic. Keep
+                            // buffering, but cap memory in case the client
+                            // never sends a valid WebM stream.
+                            if prefix.len() > 64 * 1024 {
+                                tracing::error!(
+                                    stream_id = %stream_id,
+                                    "No EBML header in first 64KB; aborting ingest"
+                                );
+                                break;
+                            }
+                            continue;
                         }
                     }
-                    pending.remove(&chunk_id);
+                };
 
-                    // Write the reassembled chunk to ffmpeg.
-                    if let Err(e) = stdin.write_all(&assembled).await {
-                        tracing::error!("ffmpeg write error for stream {stream_id}: {e}");
-                        break;
-                    }
+                if let Err(e) = stdin.write_all(payload).await {
+                    tracing::error!("ffmpeg write error for stream {stream_id}: {e}");
+                    break;
                 }
-
-                // delete stale incomplete chunks to prevent memory buildup.
-                // Keep only the most recent MAX_PENDING_CHUNKS entries.
-                while pending.len() > MAX_PENDING_CHUNKS {
-                    if let Some(&oldest) = pending.keys().min() {
-                        pending.remove(&oldest);
-                    }
+                if let Err(e) = stdin.flush().await {
+                    tracing::error!("ffmpeg flush error for stream {stream_id}: {e}");
+                    break;
                 }
             }
             Err(e) => {
-                tracing::info!("WebTransport connection closed for stream {stream_id}: {e}");
+                tracing::info!("WebTransport stream read error for {stream_id}: {e}");
                 break;
             }
         }
