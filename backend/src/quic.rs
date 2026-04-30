@@ -197,8 +197,19 @@ async fn handle_session(
             "webm",
             "-i",
             "pipe:0",
+            // libx264 with yuv420p requires both dimensions to be even.
+            // The browser canvas (e.g. a resized fidget-spinner element)
+            // can produce odd widths/heights like 761x877, which causes
+            // ffmpeg to abort with "width not divisible by 2" and tear
+            // down the whole ingest. Round both dims down to the nearest
+            // even number and pin the pixel format so the encoder always
+            // gets a valid input regardless of the source resolution.
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
             "-c:v",
             "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-preset",
             "veryfast",
             "-tune",
