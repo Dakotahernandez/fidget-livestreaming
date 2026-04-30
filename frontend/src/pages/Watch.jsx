@@ -109,6 +109,7 @@ function Watch() {
     const video = videoRef.current;
     const playbackStartedAt = performance.now();
     let metricTimer = null;
+    let manifestRetryTimer = null;
 
     const updateBufferMetrics = (currentHls = hlsRef.current) => {
       const nextMetrics = {};
@@ -161,18 +162,56 @@ function Watch() {
         // (mp4a.40.5) and Chromium's MSE rejects the source buffer with
         // "audio decoder initialization failed: kUnsupportedConfig".
         defaultAudioCodec: 'mp4a.40.2',
+        // The viewer often hits "Watch" before SRS has written the first
+        // HLS segment, so the manifest 404s for a second or two. Without
+        // these large retry budgets hls.js gives up after ~6 attempts and
+        // the user has to manually reload the page once segments appear.
+        manifestLoadingMaxRetry: 20,
+        manifestLoadingRetryDelay: 500,
+        manifestLoadingMaxRetryTimeout: 8000,
+        levelLoadingMaxRetry: 20,
+        levelLoadingRetryDelay: 500,
+        levelLoadingMaxRetryTimeout: 8000,
+        fragLoadingMaxRetry: 10,
+        fragLoadingRetryDelay: 500,
+        fragLoadingMaxRetryTimeout: 8000,
       });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
 
+      // Manual fallback retry loop for when the manifest is still missing
+      // after hls.js exhausts its built-in retries (cold-start race vs SRS).
+      const scheduleManifestRetry = () => {
+        if (manifestRetryTimer) return;
+        manifestRetryTimer = window.setTimeout(() => {
+          manifestRetryTimer = null;
+          try {
+            hls.loadSource(hlsUrl);
+            hls.startLoad();
+          } catch {
+            /* destroyed */
+          }
+        }, 1000);
+      };
+
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        // Manifest 404 while SRS is still warming up — keep retrying
+        // instead of surfacing a fatal error to the user.
+        if (
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+          data.details === Hls.ErrorDetails.LEVEL_LOAD_ERROR ||
+          data.details === Hls.ErrorDetails.LEVEL_LOAD_TIMEOUT
+        ) {
+          setPlayerError('Waiting for the broadcaster to come online...');
+          scheduleManifestRetry();
+          return;
+        }
+
         if (!data.fatal) return;
-        // Try to recover from network/media errors before giving up — some
-        // embedded browsers reject specific AAC configs but can keep playing
-        // video if we re-init the source buffer.
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
-            hls.startLoad();
+            scheduleManifestRetry();
             return;
           case Hls.ErrorTypes.MEDIA_ERROR:
             hls.recoverMediaError();
@@ -183,6 +222,10 @@ function Watch() {
       });
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (manifestRetryTimer) {
+          window.clearTimeout(manifestRetryTimer);
+          manifestRetryTimer = null;
+        }
         updatePlaybackMetrics({
           manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
         });
@@ -213,6 +256,10 @@ function Watch() {
     return () => {
       if (metricTimer) {
         window.clearInterval(metricTimer);
+      }
+      if (manifestRetryTimer) {
+        window.clearTimeout(manifestRetryTimer);
+        manifestRetryTimer = null;
       }
       video.removeEventListener('playing', handlePlaying);
       if (hlsRef.current) {
