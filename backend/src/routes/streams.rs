@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
     middleware as axum_mw,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use serde::Deserialize;
@@ -27,6 +27,7 @@ pub fn router() -> Router<(PgPool, Config)> {
     let protected = Router::new()
         .route("/", post(create))
         .route("/me", get(list_my_streams))
+        .route("/:id", delete(delete_stream))
         .route("/:id/start", put(start))
         .route("/:id/stop", put(stop))
         .layer(axum_mw::from_fn(require_auth));
@@ -198,16 +199,42 @@ async fn start(
     })))
 }
 
-/// `PUT /api/streams/:id/stop` — mark stream as offline (auth required).
+/// `PUT /api/streams/:id/stop` — end a broadcast (auth required). The
+/// stream record is deleted entirely so it cannot be restarted and won't
+/// clutter the dashboard. To go live again the streamer creates a fresh
+/// stream from the dashboard form.
 async fn stop(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(_auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
-    let s = stream::set_offline(&pool, id).await?;
+    let _ = stream::set_offline(&pool, id).await?;
 
     Ok(Json(serde_json::json!({
-        "id": s.id,
-        "is_live": s.is_live,
+        "id": id,
+        "is_live": false,
+        "deleted": true,
+    })))
+}
+
+/// `DELETE /api/streams/:id` — remove an old stream record (auth required,
+/// owner-only). Used by the dashboard to prune past streams so the UI isn't
+/// cluttered with non-active entries.
+async fn delete_stream(
+    State((pool, _config)): State<(PgPool, Config)>,
+    Extension(auth): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    let affected = stream::delete_stream(&pool, id, auth.user_id).await?;
+
+    if affected == 0 {
+        return Err(AppError::NotFound(
+            "stream not found or not owned by you".to_string(),
+        ));
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "deleted": true,
     })))
 }

@@ -66,6 +66,9 @@ export const startStream = (id) =>
 export const stopStream = (id) =>
   api.put(`/streams/${id}/stop`);
 
+export const deleteStream = (id) =>
+  api.delete(`/streams/${id}`);
+
 export const getCertHash = () =>
   api.get('/transport/cert-hash');
 

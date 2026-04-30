@@ -1,7 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
-import { createStream, listMyStreams, listStreams } from '../services/api';
+import {
+  createStream,
+  deleteStream,
+  listMyStreams,
+  listStreams,
+} from '../services/api';
 import ScreenCapture from '../components/streamer/ScreenCapture';
 
 /** RTMP ingest URL — points to the media-server container in dev. */
@@ -18,6 +23,13 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showKey, setShowKey] = useState({});
+
+  // Stream ids the user just created in this browser session. We keep them
+  // visible (so the broadcast panel stays mounted before Go Live) even
+  // though they aren't `is_live` yet. Anything *not* in this set and not
+  // currently live is treated as a stale row and pruned on the next poll.
+  const recentlyCreatedRef = useRef(new Set());
+  const pruningRef = useRef(new Set());
 
   // Redirect to login if not authenticated.
   useEffect(() => {
@@ -43,7 +55,25 @@ function Dashboard() {
       let nextError = '';
 
       if (mineResult.status === 'fulfilled') {
-        setMyStreams(mineResult.value.data || []);
+        const allMine = mineResult.value.data || [];
+        // Auto-prune any non-live streams the user didn't just create in
+        // this session. Streams are ephemeral: once a broadcast ends the
+        // record should disappear so the dashboard never accumulates
+        // non-active entries.
+        const stale = allMine.filter(
+          (s) => !s.is_live && !recentlyCreatedRef.current.has(s.id),
+        );
+        for (const s of stale) {
+          if (pruningRef.current.has(s.id)) continue;
+          pruningRef.current.add(s.id);
+          deleteStream(s.id)
+            .catch(() => { /* best-effort cleanup */ })
+            .finally(() => pruningRef.current.delete(s.id));
+        }
+        const visible = allMine.filter(
+          (s) => s.is_live || recentlyCreatedRef.current.has(s.id),
+        );
+        setMyStreams(visible);
       } else {
         nextError = 'Failed to load your streams.';
       }
@@ -75,6 +105,7 @@ function Dashboard() {
 
     try {
       const res = await createStream(title || 'My Stream', accessPassword);
+      recentlyCreatedRef.current.add(res.data.id);
       setMyStreams((prev) => [...prev, res.data]);
       setTitle('');
       setAccessPassword('');

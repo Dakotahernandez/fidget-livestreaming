@@ -141,20 +141,36 @@ pub async fn set_live(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
     Ok(stream)
 }
 
-/// Mark a stream as offline.
-pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
-    let stream = sqlx::query_as::<_, Stream>(
+/// Mark a stream offline by deleting the row. 
+pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
+    let result = sqlx::query(
         r#"
-        UPDATE streams
-        SET is_live = false, started_at = NULL
+        DELETE FROM streams
         WHERE id = $1
-        RETURNING id, user_id, stream_key, title, is_public, access_password_hash, is_live, started_at, created_at
         "#,
     )
     .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("stream not found".to_string()))?;
+    .execute(pool)
+    .await?;
 
-    Ok(stream)
+    Ok(result.rows_affected())
+}
+
+/// Delete a stream by id, returning the number of affected rows. Streamers
+/// can prune old stream records from the dashboard with this; the row is
+/// gone for good (each new "Go Live" creates a fresh record via the create
+/// endpoint).
+pub async fn delete_stream(pool: &PgPool, id: Uuid, user_id: Uuid) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM streams
+        WHERE id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
