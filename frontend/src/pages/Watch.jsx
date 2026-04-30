@@ -146,14 +146,15 @@ function Watch() {
     });
 
     if (Hls.isSupported()) {
+      // Tuned for SRS-served HLS with 0.5s fragments. Targets ~1.5s
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
-        liveSyncDurationCount: 1,
-        liveMaxLatencyDurationCount: 2,
+        liveSyncDuration: 1,
+        liveMaxLatencyDuration: 3,
         maxBufferLength: 2,
         maxMaxBufferLength: 4,
-        backBufferLength: 8,
+        backBufferLength: 4,
         maxLiveSyncPlaybackRate: 1.5,
       });
       hls.loadSource(hlsUrl);

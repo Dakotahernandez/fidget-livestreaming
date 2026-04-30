@@ -8,6 +8,7 @@ axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_urlencoded = "0.7"
 futures-util = "0.3"
 wtransport = { version = "0.7", features = ["self-signed"] }
 hex = "0.4"

@@ -1,11 +1,11 @@
-FROM alfg/nginx-rtmp
+FROM ossrs/srs:5
 
-COPY nginx.conf /etc/nginx/nginx.conf
+# Replace the upstream config with our low-latency tuned config.
+COPY srs.conf /usr/local/srs/conf/srs.conf
 
-EXPOSE 1935 8088
+EXPOSE 1935 8088 1985
 
-# Bypass the base image's templated entrypoint (which silently overwrites
-# /etc/nginx/nginx.conf with a default at startup) and run nginx directly
-# with our config in the foreground.
+# SRS expects to be invoked from its install directory.
+WORKDIR /usr/local/srs
 ENTRYPOINT []
-CMD ["nginx", "-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
+CMD ["./objs/srs", "-c", "conf/srs.conf"]

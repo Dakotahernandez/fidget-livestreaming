@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 use wtransport::{Endpoint, Identity, ServerConfig};
@@ -14,8 +14,9 @@ use crate::models::stream;
 const FRAGMENT_HEADER_SIZE: usize = 8;
 
 /// If a chunk hasn't been fully rebuilt after receiving a newer chunk_id,
-/// throw itout. This prevents memory buildup from partially-received chunks.
-const MAX_PENDING_CHUNKS: usize = 3;
+/// drop the oldest. Keeps memory bounded while tolerating brief reordering of
+/// browser-side datagram bursts. The right value depends on the chunk size i think + network condiitions.
+const MAX_PENDING_CHUNKS: usize = 8;
 
 /// Start the QUIC/WebTransport ingest server and return the SHA-256 cert hash.
 ///
@@ -185,10 +186,20 @@ async fn handle_session(
     tracing::info!("Starting ffmpeg ingest for stream {stream_id} → {destination}");
 
     // Spawn ffmpeg: read WebM from stdin → transcode to H.264/AAC → push RTMP.
+    // `-f webm` + tiny `-probesize`/`-analyzeduration` skips ffmpeg's input probe
+    // phase, which otherwise buffers ~5s of input before producing any output.
     let ffmpeg_result = Command::new("ffmpeg")
         .args([
             "-fflags",
-            "nobuffer",
+            "nobuffer+genpts",
+            "-flags",
+            "low_delay",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-f",
+            "webm",
             "-i",
             "pipe:0",
             "-c:v",
@@ -211,6 +222,8 @@ async fn handle_session(
             "128k",
             "-f",
             "flv",
+            "-flvflags",
+            "no_duration_filesize",
             &destination,
         ])
         .stdin(std::process::Stdio::piped())
@@ -236,6 +249,16 @@ async fn handle_session(
             return;
         }
     };
+
+    // Drain ffmpeg's stderr so its pipe buffer never fills up and stalls encoding.
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(stream_id = %stream_id, "ffmpeg: {line}");
+            }
+        });
+    }
 
     // Fragment reassembly state.
     // Key: chunk_id, Value: (total_fragments, received fragments indexed by position).

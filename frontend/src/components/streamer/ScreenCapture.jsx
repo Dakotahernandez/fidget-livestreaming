@@ -5,7 +5,10 @@ const MIME_TYPE = 'video/webm;codecs=vp8,opus';
 const CANVAS_FPS = 30;
 const DRAW_INTERVAL_MS = Math.round(1000 / CANVAS_FPS);
 const WEBCAM_SCALE = 0.25;
-const STREAM_TIMESLICE_MS = 250;
+// Smaller timeslices = each MediaRecorder chunk is dispatched sooner, which
+// directly lowers glass-to-glass latency. 100ms keeps WebM clusters small
+// without overwhelming datagram fragmentation.
+const STREAM_TIMESLICE_MS = 100;
 const FRAGMENT_HEADER_SIZE = 8;
 const MAX_DATAGRAM_PAYLOAD = 1200;
 const WEBTRANSPORT_UNSUPPORTED_MESSAGE = 'Live streaming requires WebTransport. Safari does not support it yet, so use Chrome or Edge to go live.';
