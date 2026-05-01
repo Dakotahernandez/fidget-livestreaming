@@ -13,8 +13,108 @@ const EMPTY_PLAYBACK_METRICS = {
   bufferMs: null,
 };
 
+// WHEP signalling is proxied same-origin through the frontend nginx at
+// `/whep/` (see frontend/nginx.conf). That keeps it HTTPS-clean in prod
+// (no mixed content), avoids CORS preflights, and means the browser
+// never has to know SRS's port directly.
+const WHEP_PATH = '/whep/';
+const WHEP_APP = 'live';
+// How long we wait for the WHEP peer connection to deliver its first
+// video frame before giving up and falling back to HLS.
+const WHEP_FIRST_FRAME_TIMEOUT_MS = 3500;
+
+/// Fetch the deployment-specific ICE server list from the backend. Falls
+/// back to a public STUN-only config so first-time deployments still get
+/// host-candidate WHEP working without extra setup.
+async function fetchIceServers(signal) {
+  try {
+    const res = await fetch('/api/config/rtc', { signal });
+    if (res.ok) {
+      const body = await res.json();
+      if (Array.isArray(body?.ice_servers)) return body.ice_servers;
+    }
+  } catch { /* fall through to default */ }
+  return [{ urls: 'stun:stun.l.google.com:19302' }];
+}
+
+/// Attempt sub-second playback via WHEP (WebRTC). Resolves with a
+/// `cleanup` function once the first frame is rendered. Rejects on
+/// signalling errors, ICE failure, or if no frame arrives in time so the
+/// caller can transparently fall back to HLS.
+async function startWhepPlayback({ streamKey, video, signal }) {
+  const iceServers = await fetchIceServers(signal);
+  const whepUrl = `${WHEP_PATH}?app=${WHEP_APP}&stream=${encodeURIComponent(streamKey)}`;
+
+  const pc = new RTCPeerConnection({
+    bundlePolicy: 'max-bundle',
+    iceServers,
+  });
+
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+
+  // Wire received tracks to the <video> element as they arrive.
+  const remoteStream = new MediaStream();
+  video.srcObject = remoteStream;
+  video.autoplay = true;
+  video.playsInline = true;
+  pc.ontrack = (event) => {
+    event.streams[0]?.getTracks().forEach((t) => remoteStream.addTrack(t));
+  };
+
+  const cleanup = () => {
+    try { pc.close(); } catch { /* ignore */ }
+    if (video.srcObject === remoteStream) {
+      video.srcObject = null;
+    }
+  };
+
+  if (signal?.aborted) {
+    cleanup();
+    throw new Error('aborted');
+  }
+  signal?.addEventListener('abort', cleanup, { once: true });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const response = await fetch(whepUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/sdp' },
+    body: offer.sdp,
+    signal,
+  });
+  if (!response.ok) {
+    cleanup();
+    throw new Error(`WHEP signalling failed: ${response.status}`);
+  }
+  const answerSdp = await response.text();
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+  // Resolve once the video element actually paints a frame; reject if it
+  // doesn't happen quickly enough so HLS can take over.
+  await new Promise((resolve, reject) => {
+    let timer = null;
+    const onPlaying = () => {
+      if (timer) clearTimeout(timer);
+      video.removeEventListener('playing', onPlaying);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      video.removeEventListener('playing', onPlaying);
+      reject(new Error('WHEP first-frame timeout'));
+    }, WHEP_FIRST_FRAME_TIMEOUT_MS);
+    video.addEventListener('playing', onPlaying);
+    // Some browsers need an explicit play() after srcObject changes.
+    video.play().catch(() => { /* ignore — onPlaying still fires when ready */ });
+  });
+
+  return cleanup;
+}
+
 /**
- * Watch page — plays an HLS stream.
+ * Watch page — plays a live stream via WHEP (WebRTC) when available,
+ * falling back to low-latency HLS.
  */
 function Watch() {
   const { id } = useParams();
@@ -23,6 +123,7 @@ function Watch() {
 
   const [stream, setStream] = useState(null);
   const [hlsUrl, setHlsUrl] = useState('');
+  const [streamKey, setStreamKey] = useState('');
   const [error, setError] = useState('');
   const [playerError, setPlayerError] = useState('');
   const [joinPassword, setJoinPassword] = useState('');
@@ -44,15 +145,15 @@ function Watch() {
 
       const res = await joinStream(id, password);
       const fallbackUrl = res.data?.hls_url || '';
-      const streamKey = res.data?.stream_key || '';
+      const nextStreamKey = res.data?.stream_key || '';
 
       let nextUrl = fallbackUrl;
       let playbackSource = 'origin';
       let edgeId = '';
 
-      if (streamKey) {
+      if (nextStreamKey) {
         try {
-          const routeRes = await resolvePlaybackRoute(streamKey);
+          const routeRes = await resolvePlaybackRoute(nextStreamKey);
           if (routeRes.data?.edge_url) {
             nextUrl = routeRes.data.edge_url;
             playbackSource = 'edge';
@@ -68,6 +169,7 @@ function Watch() {
         edgeId,
         routeLookupMs: Math.round(performance.now() - startedAt),
       });
+      setStreamKey(nextStreamKey);
       setHlsUrl(nextUrl);
     } catch (err) {
       const msg = err.response?.data?.error || 'Unable to join this stream.';
@@ -102,7 +204,8 @@ function Watch() {
     };
   }, [id, unlockStream]);
 
-  // Attach HLS.js when a stream URL is available.
+  // Attach a player when a stream URL is available. WHEP is tried first
+  // for sub-second latency; HLS is the always-available fallback.
   useEffect(() => {
     if (!hlsUrl || !videoRef.current) return;
 
@@ -110,6 +213,9 @@ function Watch() {
     const playbackStartedAt = performance.now();
     let metricTimer = null;
     let manifestRetryTimer = null;
+    let whepCleanup = null;
+    let whepAbort = null;
+    let cancelled = false;
 
     const updateBufferMetrics = (currentHls = hlsRef.current) => {
       const nextMetrics = {};
@@ -146,114 +252,149 @@ function Watch() {
       bufferMs: null,
     });
 
-    if (Hls.isSupported()) {
-      // Tuned for SRS-served HLS with 0.5s fragments. Targets ~1.5s
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-        liveSyncDuration: 1,
-        liveMaxLatencyDuration: 3,
-        maxBufferLength: 2,
-        maxMaxBufferLength: 4,
-        backBufferLength: 4,
-        maxLiveSyncPlaybackRate: 1.5,
-        // SRS doesn't emit a CODECS attribute in its master playlist, so
-        // pin AAC LC explicitly. Without this, hls.js may guess HE-AAC
-        // (mp4a.40.5) and Chromium's MSE rejects the source buffer with
-        // "audio decoder initialization failed: kUnsupportedConfig".
-        defaultAudioCodec: 'mp4a.40.2',
-        // The viewer often hits "Watch" before SRS has written the first
-        // HLS segment, so the manifest 404s for a second or two. Without
-        // these large retry budgets hls.js gives up after ~6 attempts and
-        // the user has to manually reload the page once segments appear.
-        manifestLoadingMaxRetry: 20,
-        manifestLoadingRetryDelay: 500,
-        manifestLoadingMaxRetryTimeout: 8000,
-        levelLoadingMaxRetry: 20,
-        levelLoadingRetryDelay: 500,
-        levelLoadingMaxRetryTimeout: 8000,
-        fragLoadingMaxRetry: 10,
-        fragLoadingRetryDelay: 500,
-        fragLoadingMaxRetryTimeout: 8000,
-      });
-      hls.loadSource(hlsUrl);
-      hls.attachMedia(video);
+    const startHls = () => {
+      if (cancelled) return;
+      if (Hls.isSupported()) {
+        // Tuned for SRS-served HLS with 0.5s fragments. Targets ~1.5s
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          liveSyncDuration: 1,
+          liveMaxLatencyDuration: 3,
+          maxBufferLength: 2,
+          maxMaxBufferLength: 4,
+          backBufferLength: 4,
+          maxLiveSyncPlaybackRate: 1.5,
+          // SRS doesn't emit a CODECS attribute in its master playlist, so
+          // pin AAC LC explicitly. Without this, hls.js may guess HE-AAC
+          // (mp4a.40.5) and Chromium's MSE rejects the source buffer with
+          // "audio decoder initialization failed: kUnsupportedConfig".
+          defaultAudioCodec: 'mp4a.40.2',
+          // The viewer often hits "Watch" before SRS has written the first
+          // HLS segment, so the manifest 404s for a second or two. Without
+          // these large retry budgets hls.js gives up after ~6 attempts and
+          // the user has to manually reload the page once segments appear.
+          manifestLoadingMaxRetry: 20,
+          manifestLoadingRetryDelay: 500,
+          manifestLoadingMaxRetryTimeout: 8000,
+          levelLoadingMaxRetry: 20,
+          levelLoadingRetryDelay: 500,
+          levelLoadingMaxRetryTimeout: 8000,
+          fragLoadingMaxRetry: 10,
+          fragLoadingRetryDelay: 500,
+          fragLoadingMaxRetryTimeout: 8000,
+        });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
 
-      // Manual fallback retry loop for when the manifest is still missing
-      // after hls.js exhausts its built-in retries (cold-start race vs SRS).
-      const scheduleManifestRetry = () => {
-        if (manifestRetryTimer) return;
-        manifestRetryTimer = window.setTimeout(() => {
-          manifestRetryTimer = null;
-          try {
-            hls.loadSource(hlsUrl);
-            hls.startLoad();
-          } catch {
-            /* destroyed */
-          }
-        }, 1000);
-      };
+        // Manual fallback retry loop for when the manifest is still missing
+        // after hls.js exhausts its built-in retries (cold-start race vs SRS).
+        const scheduleManifestRetry = () => {
+          if (manifestRetryTimer) return;
+          manifestRetryTimer = window.setTimeout(() => {
+            manifestRetryTimer = null;
+            try {
+              hls.loadSource(hlsUrl);
+              hls.startLoad();
+            } catch {
+              /* destroyed */
+            }
+          }, 1000);
+        };
 
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        // Manifest 404 while SRS is still warming up — keep retrying
-        // instead of surfacing a fatal error to the user.
-        if (
-          data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
-          data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
-          data.details === Hls.ErrorDetails.LEVEL_LOAD_ERROR ||
-          data.details === Hls.ErrorDetails.LEVEL_LOAD_TIMEOUT
-        ) {
-          setPlayerError('Waiting for the broadcaster to come online...');
-          scheduleManifestRetry();
-          return;
-        }
-
-        if (!data.fatal) return;
-        switch (data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          // Manifest 404 while SRS is still warming up — keep retrying
+          // instead of surfacing a fatal error to the user.
+          if (
+            data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+            data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+            data.details === Hls.ErrorDetails.LEVEL_LOAD_ERROR ||
+            data.details === Hls.ErrorDetails.LEVEL_LOAD_TIMEOUT
+          ) {
+            setPlayerError('Waiting for the broadcaster to come online...');
             scheduleManifestRetry();
             return;
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            hls.recoverMediaError();
+          }
+
+          if (!data.fatal) return;
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              scheduleManifestRetry();
+              return;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              hls.recoverMediaError();
+              return;
+            default:
+              setPlayerError('Stream is not available yet. Waiting for the broadcaster...');
+          }
+        });
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (manifestRetryTimer) {
+            window.clearTimeout(manifestRetryTimer);
+            manifestRetryTimer = null;
+          }
+          updatePlaybackMetrics({
+            manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
+          });
+          setPlayerError('');
+          video.play().catch(() => {});
+        });
+
+        hls.on(Hls.Events.LEVEL_UPDATED, () => updateBufferMetrics(hls));
+
+        hlsRef.current = hls;
+        metricTimer = window.setInterval(() => updateBufferMetrics(hls), 1000);
+      } else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS.
+        const handleLoadedMetadata = () => {
+          updatePlaybackMetrics({
+            manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
+          });
+          video.play().catch(() => {});
+        };
+
+        video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
+        video.src = hlsUrl;
+        metricTimer = window.setInterval(() => updateBufferMetrics(null), 1000);
+      } else {
+        setPlayerError('Your browser does not support HLS playback.');
+      }
+    };
+
+    // Try WHEP first if we have a stream key and the browser supports
+    // RTCPeerConnection. Falls back to HLS on any failure.
+    if (streamKey && typeof RTCPeerConnection === 'function') {
+      const controller = new AbortController();
+      whepAbort = controller;
+      startWhepPlayback({ streamKey, video, signal: controller.signal })
+        .then((cleanup) => {
+          if (cancelled) {
+            cleanup();
             return;
-          default:
-            setPlayerError('Stream is not available yet. Waiting for the broadcaster...');
-        }
-      });
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (manifestRetryTimer) {
-          window.clearTimeout(manifestRetryTimer);
-          manifestRetryTimer = null;
-        }
-        updatePlaybackMetrics({
-          manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
+          }
+          whepCleanup = cleanup;
+          updatePlaybackMetrics({
+            source: 'webrtc',
+            manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
+          });
+          setPlayerError('');
+          metricTimer = window.setInterval(() => updateBufferMetrics(null), 1000);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          // Reset video element so HLS can take over cleanly.
+          try { video.srcObject = null; } catch { /* ignore */ }
+          startHls();
         });
-        setPlayerError('');
-        video.play().catch(() => {});
-      });
-
-      hls.on(Hls.Events.LEVEL_UPDATED, () => updateBufferMetrics(hls));
-
-      hlsRef.current = hls;
-      metricTimer = window.setInterval(() => updateBufferMetrics(hls), 1000);
-    } else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
-      // Safari native HLS.
-      const handleLoadedMetadata = () => {
-        updatePlaybackMetrics({
-          manifestLoadMs: Math.round(performance.now() - playbackStartedAt),
-        });
-        video.play().catch(() => {});
-      };
-
-      video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
-      video.src = hlsUrl;
-      metricTimer = window.setInterval(() => updateBufferMetrics(null), 1000);
     } else {
-      setPlayerError('Your browser does not support HLS playback.');
+      startHls();
     }
 
     return () => {
+      cancelled = true;
+      if (whepAbort) whepAbort.abort();
+      if (whepCleanup) whepCleanup();
       if (metricTimer) {
         window.clearInterval(metricTimer);
       }
@@ -267,7 +408,7 @@ function Watch() {
         hlsRef.current = null;
       }
     };
-  }, [hlsUrl, updatePlaybackMetrics]);
+  }, [hlsUrl, streamKey, updatePlaybackMetrics]);
 
   const metricLabel = (value) => (value == null ? '...' : `${value} ms`);
 

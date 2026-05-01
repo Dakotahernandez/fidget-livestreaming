@@ -177,76 +177,72 @@ async fn handle_session(
     }
 
     let destination = format!("{rtmp_url}/{stream_key}");
-    tracing::info!("Starting ffmpeg ingest for stream {stream_id} → {destination}");
+    tracing::info!("Starting WebTransport ingest for stream {stream_id} → {destination}");
 
-    // Spawn ffmpeg: read WebM from stdin → transcode to H.264/AAC → push RTMP.
-    // Probe sizes are kept small but large enough to fit the WebM EBML header
-    // (~1KB). 32 bytes was too small and caused ffmpeg to hang waiting for
-    // a parseable header that never fit in the probe buffer.
-    let ffmpeg_result = Command::new("ffmpeg")
-        .args([
-            "-fflags",
-            "nobuffer+genpts",
-            "-flags",
-            "low_delay",
-            "-probesize",
-            "32K",
-            "-analyzeduration",
-            "100000",
-            "-f",
-            "webm",
-            "-i",
-            "pipe:0",
-            // libx264 with yuv420p requires both dimensions to be even.
-            // The browser canvas (e.g. a resized fidget-spinner element)
-            // can produce odd widths/heights like 761x877, which causes
-            // ffmpeg to abort with "width not divisible by 2" and tear
-            // down the whole ingest. Round both dims down to the nearest
-            // even number and pin the pixel format so the encoder always
-            // gets a valid input regardless of the source resolution.
-            "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "veryfast",
-            "-tune",
-            "zerolatency",
-            "-g",
-            "30",
-            "-keyint_min",
-            "30",
-            "-sc_threshold",
-            "0",
-            "-force_key_frames",
-            "expr:gte(t,n_forced*1)",
-            "-c:a",
-            "aac",
-            // Pin profile + sample rate + channels so Chromium's MSE AAC
-            // decoder doesn't reject the stream with kUnsupportedConfig.
-            // Browser AudioContext + MediaRecorder can produce variable
-            // configs; normalising here gives the player a known-good shape.
-            "-profile:a",
-            "aac_low",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-b:a",
-            "128k",
-            "-f",
-            "flv",
-            "-flvflags",
-            "no_duration_filesize",
-            &destination,
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    // Fragment reassembly state removed: we now use a single ordered
+    // unidirectional WebTransport stream that delivers the WebM byte stream
+    // in order. This eliminates the cross-browser flakiness of QUIC
+    // datagrams (Firefox in particular silently drops them on many paths).
+    let mut total_bytes_written: u64 = 0;
+    let mut reads: u64 = 0;
 
+    tracing::info!(stream_id = %stream_id, "Waiting for unidirectional WebTransport stream");
+
+    let mut recv_stream = match connection.accept_uni().await {
+        Ok(s) => {
+            tracing::info!(stream_id = %stream_id, "Unidirectional stream accepted, entering read loop");
+            s
+        }
+        Err(e) => {
+            tracing::warn!(stream_id = %stream_id, "Failed to accept unidirectional stream: {e}");
+            let _ = stream::set_offline(&pool, stream_id).await;
+            return;
+        }
+    };
+
+    // Detect the container format the browser is sending before we spawn
+    // ffmpeg, so we can `-c:v copy` H.264/MP4 inputs and skip the
+    // libx264 transcode (which adds 200-400 ms of latency).
+    let mut buf = vec![0u8; STREAM_READ_BUF];
+    let mut prefix: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let detected = loop {
+        match recv_stream.read(&mut buf).await {
+            Ok(Some(0)) | Ok(None) => {
+                tracing::warn!(stream_id = %stream_id, "stream ended before container header arrived");
+                let _ = stream::set_offline(&pool, stream_id).await;
+                return;
+            }
+            Ok(Some(n)) => {
+                prefix.extend_from_slice(&buf[..n]);
+                if let Some((fmt, offset)) = detect_input_format(&prefix) {
+                    tracing::info!(
+                        stream_id = %stream_id,
+                        format = ?fmt,
+                        skipped = offset,
+                        prefix_len = prefix.len(),
+                        "container detected"
+                    );
+                    break (fmt, offset);
+                }
+                if prefix.len() > 64 * 1024 {
+                    tracing::error!(
+                        stream_id = %stream_id,
+                        "no recognised container header in first 64KB; aborting ingest"
+                    );
+                    let _ = stream::set_offline(&pool, stream_id).await;
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::info!("WebTransport stream read error for {stream_id}: {e}");
+                let _ = stream::set_offline(&pool, stream_id).await;
+                return;
+            }
+        }
+    };
+    let (input_format, header_offset) = detected;
+
+    let ffmpeg_result = spawn_ffmpeg(input_format, &destination);
     let mut child = match ffmpeg_result {
         Ok(c) => c,
         Err(e) => {
@@ -276,40 +272,18 @@ async fn handle_session(
         });
     }
 
-    // Fragment reassembly state removed: we now use a single ordered
-    // unidirectional WebTransport stream that delivers the WebM byte stream
-    // in order. This eliminates the cross-browser flakiness of QUIC
-    // datagrams (Firefox in particular silently drops them on many paths).
-    let mut total_bytes_written: u64 = 0;
-    let mut reads: u64 = 0;
-
-    tracing::info!(stream_id = %stream_id, "Waiting for unidirectional WebTransport stream");
-
-    let mut recv_stream = match connection.accept_uni().await {
-        Ok(s) => {
-            tracing::info!(stream_id = %stream_id, "Unidirectional stream accepted, entering read loop");
-            s
-        }
-        Err(e) => {
-            tracing::warn!(stream_id = %stream_id, "Failed to accept unidirectional stream: {e}");
-            drop(stdin);
+    // Flush the buffered prefix (minus any leading priming bytes) to ffmpeg.
+    if header_offset < prefix.len() {
+        let initial = &prefix[header_offset..];
+        if let Err(e) = stdin.write_all(initial).await {
+            tracing::error!("ffmpeg write error for stream {stream_id}: {e}");
             let _ = child.kill().await;
-            let _ = child.wait().await;
             let _ = stream::set_offline(&pool, stream_id).await;
             return;
         }
-    };
-
-    let mut buf = vec![0u8; STREAM_READ_BUF];
-    // The browser sends a 1-byte priming write so the QUIC STREAM frame
-    // hits the wire immediately; otherwise streams open lazily and the
-    // backend's accept_uni() can stall waiting for the first MediaRecorder
-    // chunk. We must skip everything until we see the WebM EBML magic
-    // (0x1A 0x45 0xDF 0xA3) so the priming byte (and any other client
-    // preamble) does not corrupt ffmpeg's input.
-    const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
-    let mut header_seen = false;
-    let mut prefix: Vec<u8> = Vec::with_capacity(8);
+        total_bytes_written += initial.len() as u64;
+    }
+    drop(prefix);
 
     loop {
         match recv_stream.read(&mut buf).await {
@@ -325,63 +299,12 @@ async fn handle_session(
                         stream_id = %stream_id,
                         reads,
                         bytes = total_bytes_written,
-                        header_seen,
                         "Read bytes from WT stream"
                     );
                 }
 
-                let payload: &[u8] = if header_seen {
-                    &buf[..n]
-                } else {
-                    // Append to prefix and search for EBML magic.
-                    prefix.extend_from_slice(&buf[..n]);
-                    match prefix.windows(4).position(|w| w == EBML_MAGIC) {
-                        Some(idx) => {
-                            header_seen = true;
-                            tracing::info!(
-                                stream_id = %stream_id,
-                                skipped = idx,
-                                "EBML header found, starting ffmpeg feed"
-                            );
-                            // Move past skipped bytes; everything from idx
-                            // onwards is the real WebM stream.
-                            let stripped = prefix.split_off(idx);
-                            // Replace prefix with stripped so future writes
-                            // (none expected here) won't double-feed.
-                            prefix = Vec::new();
-                            // Use stripped as this iteration's payload.
-                            if let Err(e) = stdin.write_all(&stripped).await {
-                                tracing::error!("ffmpeg write error for stream {stream_id}: {e}");
-                                break;
-                            }
-                            if let Err(e) = stdin.flush().await {
-                                tracing::error!("ffmpeg flush error for stream {stream_id}: {e}");
-                                break;
-                            }
-                            continue;
-                        }
-                        None => {
-                            // Not enough data yet to find EBML magic. Keep
-                            // buffering, but cap memory in case the client
-                            // never sends a valid WebM stream.
-                            if prefix.len() > 64 * 1024 {
-                                tracing::error!(
-                                    stream_id = %stream_id,
-                                    "No EBML header in first 64KB; aborting ingest"
-                                );
-                                break;
-                            }
-                            continue;
-                        }
-                    }
-                };
-
-                if let Err(e) = stdin.write_all(payload).await {
+                if let Err(e) = stdin.write_all(&buf[..n]).await {
                     tracing::error!("ffmpeg write error for stream {stream_id}: {e}");
-                    break;
-                }
-                if let Err(e) = stdin.flush().await {
-                    tracing::error!("ffmpeg flush error for stream {stream_id}: {e}");
                     break;
                 }
             }
@@ -403,4 +326,131 @@ async fn handle_session(
     }
 
     tracing::info!("Ingest ended for stream {stream_id}");
+}
+
+/// Container format the browser is sending over WebTransport. The choice
+/// drives whether ffmpeg has to transcode (`WebM` → libx264) or can copy
+/// the H.264 elementary stream straight into RTMP (`Mp4`).
+#[derive(Debug, Clone, Copy)]
+enum InputFormat {
+    /// VP8 + Opus inside a Matroska/WebM container (Firefox + older Chrome).
+    WebM,
+    /// H.264 + AAC inside fragmented MP4 (Chrome >= 130).
+    Mp4,
+}
+
+/// Inspect the first bytes of the WebTransport stream and identify the
+/// container format. Returns the format together with the byte offset
+/// where the real container header starts so the caller can strip any
+/// priming bytes the browser sent before the first cluster/box.
+fn detect_input_format(data: &[u8]) -> Option<(InputFormat, usize)> {
+    const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+
+    if let Some(idx) = data.windows(4).position(|w| w == EBML_MAGIC) {
+        return Some((InputFormat::WebM, idx));
+    }
+    if let Some(idx) = data.windows(4).position(|w| w == *b"ftyp") {
+        if idx >= 4 {
+            // The 4 bytes immediately before "ftyp" are the box size.
+            return Some((InputFormat::Mp4, idx - 4));
+        }
+    }
+    None
+}
+
+/// Spawn ffmpeg configured for the detected input container. WebM is
+/// transcoded to H.264/AAC; fragmented MP4 from MediaRecorder is already
+/// H.264/AAC so we copy both streams to skip an entire encode pass.
+fn spawn_ffmpeg(
+    format: InputFormat,
+    destination: &str,
+) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-fflags",
+        "nobuffer+genpts",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "32K",
+        "-analyzeduration",
+        "0",
+    ]);
+
+    match format {
+        InputFormat::WebM => {
+            cmd.args([
+                "-f",
+                "webm",
+                "-i",
+                "pipe:0",
+                // libx264 with yuv420p requires both dimensions to be even.
+                // The browser canvas (e.g. a resized fidget-spinner element)
+                // can produce odd widths/heights like 761x877, which causes
+                // ffmpeg to abort with "width not divisible by 2" and tear
+                // down the whole ingest. Round both dims down to the nearest
+                // even number and pin the pixel format so the encoder always
+                // gets a valid input regardless of the source resolution.
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "veryfast",
+                "-tune",
+                "zerolatency",
+                "-g",
+                "30",
+                "-keyint_min",
+                "30",
+                "-sc_threshold",
+                "0",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*1)",
+                "-c:a",
+                "aac",
+                // Pin profile + sample rate + channels so Chromium's MSE AAC
+                // decoder doesn't reject the stream with kUnsupportedConfig.
+                "-profile:a",
+                "aac_low",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-b:a",
+                "128k",
+            ]);
+        }
+        InputFormat::Mp4 => {
+            // MediaRecorder fMP4 is already H.264/AAC LC at the right
+            // sample rate; copy both streams straight through. This is
+            // the big latency win: no encoder lookahead, no GOP rewrite.
+            cmd.args([
+                "-f",
+                "mp4",
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-bsf:a",
+                "aac_adtstoasc",
+            ]);
+        }
+    }
+
+    cmd.args([
+        "-f",
+        "flv",
+        "-flvflags",
+        "no_duration_filesize",
+        destination,
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
 }

@@ -53,6 +53,7 @@ async fn main() {
         .nest("/api/auth", routes::auth::router())
         .nest("/api/streams", routes::streams::router())
         .nest("/api/internal/rtmp", routes::internal::router())
+        .nest("/api/config", routes::config::router())
         .route("/api/transport/cert-hash", get(routes::ingest::cert_hash))
         .layer(Extension(cfg.jwt_secret.clone()))
         .layer(Extension(cert_hash))

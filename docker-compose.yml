@@ -46,15 +46,46 @@ services:
 
   media-server:
     build: ./media-server
+    environment:
+      # WebRTC ICE candidate that SRS advertises to browsers. For local dev
+      # this is the host loopback; override in production with the public
+      # host IP so remote viewers can reach UDP 8000.
+      CANDIDATE: ${CANDIDATE:-127.0.0.1}
     ports:
       - "1935:1935"
       - "8088:8088"
+      # WebRTC media (DTLS/SRTP) for WHEP playback. WHEP signalling
+      # (port 1985) is reverse-proxied through the frontend nginx as
+      # `/whep/` so it stays same-origin and HTTPS-clean — no need to
+      # publish 1985 directly.
+      - "8000:8000/udp"
     volumes:
       - hls_segments:/tmp/hls
     depends_on:
       - backend
     networks:
       - fidget-net
+
+  # TURN relay for WHEP viewers behind symmetric NAT / strict corporate
+  # firewalls. Disabled by default (run with `--profile turn` to start it)
+  # because most local-dev viewers don't need it. In production, enable
+  # this and set TURN_URL / TURN_USERNAME / TURN_PASSWORD in .env so the
+  # backend's /api/config/rtc endpoint hands the credentials to viewers.
+  coturn:
+    image: coturn/coturn:latest
+    profiles: ["turn"]
+    network_mode: host
+    command: >
+      -n
+      --no-cli
+      --no-tls
+      --no-dtls
+      --listening-port=3478
+      --realm=${TURN_REALM:-fidget.local}
+      --user=${TURN_USERNAME:-fidget}:${TURN_PASSWORD:-changeme}
+      --external-ip=${CANDIDATE:-127.0.0.1}
+      --min-port=49160
+      --max-port=49200
 
   edge:
     build: ./edge
