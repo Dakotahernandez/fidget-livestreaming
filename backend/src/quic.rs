@@ -358,9 +358,59 @@ fn detect_input_format(data: &[u8]) -> Option<(InputFormat, usize)> {
     None
 }
 
-/// Spawn ffmpeg configured for the detected input container. WebM is
-/// transcoded to H.264/AAC; fragmented MP4 from MediaRecorder is already
-/// H.264/AAC so we copy both streams to skip an entire encode pass.
+/// Suffixes appended to the base stream key for the manual quality
+/// selection ladder. The empty string is the source rendition (no
+/// downscale); the others are downscaled variants.
+///
+/// Viewers swap renditions by appending the suffix to the playback URL,
+/// e.g. `…/hls/live_<uuid>_480p/index.m3u8`. SRS sees each rendition as
+/// an independent publish, generates an independent HLS playlist for it,
+/// and bridges it to its own WHEP endpoint.
+const RENDITIONS: &[Rendition] = &[
+    Rendition { suffix: "", width: 0, height: 0, video_kbps: 0, audio_kbps: 128 }, // source
+    Rendition { suffix: "_480p", width: 854, height: 480, video_kbps: 1000, audio_kbps: 96 },
+    Rendition { suffix: "_360p", width: 640, height: 360, video_kbps: 600,  audio_kbps: 64 },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct Rendition {
+    /// Stream-key suffix (empty for source).
+    suffix: &'static str,
+    /// Target width — 0 means "keep source resolution" (source rendition only).
+    width: u32,
+    /// Target height — 0 means "keep source resolution".
+    height: u32,
+    /// Video bitrate in kbps — 0 means "let libx264 pick" (source rendition).
+    video_kbps: u32,
+    /// Audio bitrate in kbps.
+    audio_kbps: u32,
+}
+
+/// Spawn ffmpeg configured for the detected input container with a
+/// fanout to multiple output renditions (source + downscales).
+///
+/// Topology:
+///   - One demux + one decode of the input pipe.
+///   - `-filter_complex … split=N …` forks the single decoded frame
+///     stream into one branch per rendition that needs encoding (the
+///     source is included as its own branch when WebM, since VP8 can't
+///     `-c:v copy` to RTMP/H.264).
+///   - Each branch has its own scale chain → labelled output pad.
+///   - Per-output stanzas map a labelled pad → libx264 → flv RTMP URL.
+///
+/// Why this matters vs the previous per-output `-vf` design: with
+/// per-output `-vf`, each output gets its own filter chain and (in
+/// practice) its own framing assumptions, which combined with sparse
+/// input keyframes from the browser's canvas captureStream meant the
+/// bitrate-capped downscale encoders were fed almost no decoded frames
+/// and produced mostly empty TS segments. A single shared decode +
+/// `split` makes the frame fanout explicit and uniform across all
+/// renditions, so a recovered keyframe benefits every encoder at once.
+///
+/// Input flags also tell the demuxer/decoder to be tolerant of partial
+/// WebM clusters (`+discardcorrupt`, `-err_detect ignore_err`) instead
+/// of bailing the whole pipeline when MediaRecorder ships an interframe
+/// before its keyframe arrives.
 fn spawn_ffmpeg(
     format: InputFormat,
     destination: &str,
@@ -368,89 +418,170 @@ fn spawn_ffmpeg(
     let mut cmd = Command::new("ffmpeg");
     cmd.args([
         "-fflags",
-        "nobuffer+genpts",
+        "nobuffer+genpts+discardcorrupt",
         "-flags",
         "low_delay",
+        "-err_detect",
+        "ignore_err",
         "-probesize",
         "32K",
         "-analyzeduration",
         "0",
     ]);
 
+    // Input container.
     match format {
         InputFormat::WebM => {
-            cmd.args([
-                "-f",
-                "webm",
-                "-i",
-                "pipe:0",
-                // libx264 with yuv420p requires both dimensions to be even.
-                // The browser canvas (e.g. a resized fidget-spinner element)
-                // can produce odd widths/heights like 761x877, which causes
-                // ffmpeg to abort with "width not divisible by 2" and tear
-                // down the whole ingest. Round both dims down to the nearest
-                // even number and pin the pixel format so the encoder always
-                // gets a valid input regardless of the source resolution.
-                "-vf",
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-preset",
-                "veryfast",
-                "-tune",
-                "zerolatency",
-                "-g",
-                "30",
-                "-keyint_min",
-                "30",
-                "-sc_threshold",
-                "0",
-                "-force_key_frames",
-                "expr:gte(t,n_forced*1)",
-                "-c:a",
-                "aac",
-                // Pin profile + sample rate + channels so Chromium's MSE AAC
-                // decoder doesn't reject the stream with kUnsupportedConfig.
-                "-profile:a",
-                "aac_low",
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
-                "-b:a",
-                "128k",
-            ]);
+            cmd.args(["-f", "webm", "-i", "pipe:0"]);
         }
         InputFormat::Mp4 => {
-            // MediaRecorder fMP4 is already H.264/AAC LC at the right
-            // sample rate; copy both streams straight through. This is
-            // the big latency win: no encoder lookahead, no GOP rewrite.
-            cmd.args([
-                "-f",
-                "mp4",
-                "-i",
-                "pipe:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "copy",
-                "-bsf:a",
-                "aac_adtstoasc",
-            ]);
+            cmd.args(["-f", "mp4", "-i", "pipe:0"]);
         }
     }
 
-    cmd.args([
-        "-f",
-        "flv",
-        "-flvflags",
-        "no_duration_filesize",
-        destination,
-    ])
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::piped())
-    .spawn()
+    // Decide which renditions go through the libx264 filter graph.
+    // - WebM source must re-encode (VP8 → H.264) so it joins the graph.
+    // - MP4 source can `-c:v copy` straight through, so it bypasses
+    //   the graph and is mapped from `0:v` directly with `-c:v copy`.
+    // - All downscales always join the graph.
+    let source_through_filter = matches!(format, InputFormat::WebM);
+    let mut filter_renditions: Vec<&Rendition> = Vec::new();
+    if source_through_filter {
+        if let Some(src) = RENDITIONS.iter().find(|r| r.suffix.is_empty()) {
+            filter_renditions.push(src);
+        }
+    }
+    for r in RENDITIONS.iter().filter(|r| !r.suffix.is_empty()) {
+        filter_renditions.push(r);
+    }
+
+    // Build the `-filter_complex` graph if there's anything to put in it.
+    // Single-branch case still goes through `split=1` so we always end up
+    // with named output pads — keeps the per-output `-map` logic uniform.
+    let pad_label = |suffix: &str| -> String {
+        if suffix.is_empty() {
+            "v_src".to_string()
+        } else {
+            format!("v{}", suffix)
+        }
+    };
+    let labels: Vec<String> = filter_renditions
+        .iter()
+        .map(|r| pad_label(r.suffix))
+        .collect();
+
+    if !filter_renditions.is_empty() {
+        let n = filter_renditions.len();
+        let mut graph = String::new();
+        // Fork the single decoded video stream N ways.
+        graph.push_str("[0:v]split=");
+        graph.push_str(&n.to_string());
+        for i in 0..n {
+            graph.push_str(&format!("[s{i}]"));
+        }
+        graph.push(';');
+        // Per-branch scaling.
+        for (i, r) in filter_renditions.iter().enumerate() {
+            let chain = if r.suffix.is_empty() {
+                // Source: just enforce even dims + pixel format.
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p".to_string()
+            } else {
+                // Downscale: fit-within target box, then even dims + pix fmt.
+                format!(
+                    "scale={}:{}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                    r.width, r.height
+                )
+            };
+            graph.push_str(&format!("[s{i}]{chain}[{}];", labels[i]));
+        }
+        // Strip trailing ';'.
+        graph.pop();
+        cmd.args(["-filter_complex", graph.as_str()]);
+    }
+
+    // Per-rendition output stanzas. `Command::args` clones each arg into
+    // an owned `OsString` internally, so the local `String` bindings here
+    // only need to live until the matching `cmd.args(...)` call returns.
+    for r in RENDITIONS {
+        let is_source = r.suffix.is_empty();
+
+        // Video map: labelled pad if this rendition went through the
+        // filter graph; raw `0:v` otherwise (MP4 source `-c:v copy`).
+        let through_filter = filter_renditions.iter().any(|fr| fr.suffix == r.suffix);
+        let map_label = if through_filter {
+            format!("[{}]", pad_label(r.suffix))
+        } else {
+            "0:v".to_string()
+        };
+        cmd.args(["-map", map_label.as_str(), "-map", "0:a"]);
+
+        // Video codec.
+        let needs_libx264 = match format {
+            InputFormat::WebM => true,
+            InputFormat::Mp4 => !is_source,
+        };
+        if needs_libx264 {
+            cmd.args([
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "veryfast",
+                "-tune", "zerolatency",
+                "-g", "30",
+                "-keyint_min", "30",
+                "-sc_threshold", "0",
+                "-force_key_frames", "expr:gte(t,n_forced*1)",
+            ]);
+            if r.video_kbps > 0 {
+                // Soft cap rather than strict CBR. With maxrate ==
+                // bitrate the rate controller has to quantize I-frames
+                // *down* whenever an instantaneous peak goes above the
+                // target, which corrupts keyframes and produces the
+                // "single good frame then gray" pattern at low
+                // bitrates (very visible on 360p). Letting peak go
+                // 1.5× the average and giving 4s of VBV buffer means
+                // I-frames can spend bits freely and the rate
+                // controller catches up over the long-skip P-frames
+                // we get from sparse VFR input.
+                let b = format!("{}k", r.video_kbps);
+                let maxb = format!("{}k", r.video_kbps * 3 / 2);
+                let bufb = format!("{}k", r.video_kbps * 4);
+                cmd.args([
+                    "-b:v", b.as_str(),
+                    "-maxrate", maxb.as_str(),
+                    "-bufsize", bufb.as_str(),
+                ]);
+            }
+        } else {
+            cmd.args(["-c:v", "copy"]);
+        }
+
+        // Audio codec — same rule as before: source MP4 copies, anything
+        // else re-encodes to AAC LC at the rendition's bitrate.
+        if !is_source || matches!(format, InputFormat::WebM) {
+            let b = format!("{}k", r.audio_kbps);
+            cmd.args([
+                "-c:a", "aac",
+                "-profile:a", "aac_low",
+                "-ar", "48000",
+                "-ac", "2",
+                "-b:a", b.as_str(),
+            ]);
+        } else {
+            cmd.args(["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]);
+        }
+
+        // RTMP output URL: `<base>` for source, `<base>_480p` etc.
+        let out_url = if is_source {
+            destination.to_string()
+        } else {
+            format!("{destination}{}", r.suffix)
+        };
+        cmd.args(["-f", "flv", "-flvflags", "no_duration_filesize"]);
+        cmd.arg(out_url.as_str());
+    }
+
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
 }

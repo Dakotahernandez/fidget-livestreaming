@@ -31,6 +31,25 @@ struct RtmpCallback {
     stream: String,
 }
 
+/// The backend's ffmpeg fans out to per-quality rendition publishes whose
+/// stream names are `<key>_480p`, `<key>_360p`, etc. SRS calls on_publish
+/// once per rendition; this strips the suffix so the DB lookup hits the
+/// single base stream record.
+///
+/// Returns `(base_key, is_rendition)`. `is_rendition == true` means the
+/// callback corresponds to a downscale variant rather than the source
+/// publish — caller should accept it (so SRS is happy) but skip the
+/// `is_live` state transitions, which only the source publish drives.
+fn split_rendition_suffix(stream_key: &str) -> (&str, bool) {
+    const SUFFIXES: &[&str] = &["_240p", "_360p", "_480p", "_720p", "_1080p"];
+    for suffix in SUFFIXES {
+        if let Some(base) = stream_key.strip_suffix(suffix) {
+            return (base, true);
+        }
+    }
+    (stream_key, false)
+}
+
 /// Parse either an `application/json` (SRS) or `application/x-www-form-urlencoded`
 /// (nginx-rtmp) body. Keeping both supported avoids a flag day if anyone runs the
 /// old media server image locally.
@@ -67,11 +86,21 @@ async fn on_publish(
 ) -> Result<Response, AppError> {
     let payload = extract_callback(&headers, &body)?;
     let stream_key = payload.stream;
+    let (base_key, is_rendition) = split_rendition_suffix(&stream_key);
 
-    match stream::find_by_stream_key(&pool, &stream_key).await? {
+    match stream::find_by_stream_key(&pool, base_key).await? {
         Some(s) => {
-            stream::set_live(&pool, s.id).await?;
-            tracing::info!(stream_key = %stream_key, "Accepted RTMP publish");
+            // Only the source publish drives is_live — rendition callbacks
+            // arrive moments later and would just re-flip an already-live
+            // stream, so skip them to keep DB churn down.
+            if !is_rendition {
+                stream::set_live(&pool, s.id).await?;
+            }
+            tracing::info!(
+                stream_key = %stream_key,
+                rendition = is_rendition,
+                "Accepted RTMP publish"
+            );
             Ok((StatusCode::OK, "0").into_response())
         }
         None => {
@@ -94,8 +123,16 @@ async fn on_publish_done(
 ) -> Result<Response, AppError> {
     let payload = extract_callback(&headers, &body)?;
     let stream_key = payload.stream;
+    let (base_key, is_rendition) = split_rendition_suffix(&stream_key);
 
-    if let Some(s) = stream::find_by_stream_key(&pool, &stream_key).await? {
+    // Rendition publishes can stop and restart independently of the source
+    // (e.g. one libx264 encoder hiccups). Don't let those events flip the
+    // user-visible `is_live` flag — only the source publish ending should.
+    if is_rendition {
+        return Ok((StatusCode::OK, "0").into_response());
+    }
+
+    if let Some(s) = stream::find_by_stream_key(&pool, base_key).await? {
         stream::set_offline(&pool, s.id).await?;
         tracing::info!(stream_key = %stream_key, "Marked stream offline");
     }

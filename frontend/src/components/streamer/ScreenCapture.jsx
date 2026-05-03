@@ -1,14 +1,18 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { getCertHash, getTransportUrl } from '../../services/api';
 
-// Preferred ingest codec is H.264/AAC inside fragmented MP4 — the backend
-// can `-c:v copy` it straight to RTMP, skipping the libx264 transcode
-// that adds 200-400ms of glass-to-glass latency. We fall back to VP8/Opus
-// in WebM on browsers that don't yet support fMP4 from MediaRecorder
-// (Chrome < 130, Firefox).
+// WebM/VP8 is preferred for canvas captureStream sources because
+// MediaRecorder emits one cluster per timeslice without needing
+// keyframe alignment — chunks flow immediately. Fragmented MP4
+// requires every fragment to start on a keyframe, and canvas sources
+// only issue keyframes every 1-2s, so MediaRecorder stalls waiting
+// for the first keyframe and `ondataavailable` never fires at our
+// 100ms timeslice. fMP4 stays in the list as a fallback so a future
+// non-canvas source (e.g. a raw camera track) can still hit the
+// zero-transcode `-c:v copy` path on the backend.
 const PREFERRED_MIME_TYPES = [
-  'video/mp4;codecs=avc1.42E01F,mp4a.40.2',
   'video/webm;codecs=vp8,opus',
+  'video/mp4;codecs=avc1.42E01F,mp4a.40.2',
 ];
 const CANVAS_FPS = 30;
 const DRAW_INTERVAL_MS = Math.round(1000 / CANVAS_FPS);
@@ -143,7 +147,39 @@ function ScreenCapture({ streamId }) {
       }
 
       const canvas = canvasRef.current;
-      const canvasStream = canvas.getContext('2d') && canvas.captureStream(CANVAS_FPS);
+      // Touch the 2D context so `canvas.captureStream` works later if
+      // the broadcast falls back to canvas mode (and so the local
+      // preview can be drawn).
+      canvas.getContext('2d');
+
+      // Decide what video source feeds the broadcast (the MediaRecorder
+      // input). Two modes:
+      //
+      //   - Direct (webcam off): pass the raw screen-capture track from
+      //     getDisplayMedia straight to the recorder. The OS produces
+      //     frames here independently of the page's JS execution, so
+      //     MediaRecorder keeps getting frames even when the streamer
+      //     tab is backgrounded. The canvas is still drawn for local
+      //     preview but isn't on the broadcast path.
+      //
+      //   - Canvas (webcam on): use `canvas.captureStream` so the
+      //     picture-in-picture composition is included in the broadcast.
+      //     This path depends on the canvas being drawn, which depends
+      //     on `setInterval` firing — and Chrome throttles JS timers
+      //     hard in hidden tabs, so the streamer must keep the tab
+      //     visible. (Pre-this-change, all broadcasts used canvas mode,
+      //     which is why backgrounding the tab caused viewer-side gray
+      //     screens regardless of webcam state.)
+      //
+      // The choice is fixed for the duration of the capture session
+      // because MediaRecorder doesn't support swapping its input track
+      // mid-recording. Toggling webcam during a broadcast updates the
+      // local preview but doesn't change what viewers see.
+      const broadcastUsesDirectScreen = !webcamOnRef.current;
+      const screenVideoTrack = stream.getVideoTracks()[0];
+      const broadcastStream = broadcastUsesDirectScreen && screenVideoTrack
+        ? new MediaStream([screenVideoTrack])
+        : canvas.captureStream(CANVAS_FPS);
 
       // Build the audio mixer. All audio (screen, mic, soundboard) is
       // routed through `audioDest` so MediaRecorder sees a single mixed
@@ -158,6 +194,17 @@ function ScreenCapture({ streamId }) {
       audioCtxRef.current = ctx;
       audioDestRef.current = dest;
 
+      // Keep a zero-amplitude ConstantSourceNode wired into the mixer so
+      // the destination's audio track always pushes frames, even when the
+      // user hasn't granted screen audio, the mic is off, and no soundboard
+      // sound has played. Without this, Chrome's WebM MediaRecorder waits
+      // forever for an audio frame that never arrives — `ondataavailable`
+      // never fires and "Go Live" silently sends nothing.
+      const silentKeepalive = ctx.createConstantSource();
+      silentKeepalive.offset.value = 0;
+      silentKeepalive.connect(dest);
+      silentKeepalive.start();
+
       // Pipe shared-screen audio (if the user granted it) into the mixer.
       if (stream.getAudioTracks().length > 0) {
         const screenSrc = ctx.createMediaStreamSource(
@@ -167,12 +214,13 @@ function ScreenCapture({ streamId }) {
         screenAudioSrcRef.current = screenSrc;
       }
 
-      // Composite stream gets the canvas video track + the mixed audio
-      // track. We deliberately do NOT add the raw screen audio tracks here
-      // because most browsers' MediaRecorder only encodes the first audio
-      // track, so adding multiple causes silent loss of mic/soundboard.
-      dest.stream.getAudioTracks().forEach((t) => canvasStream.addTrack(t));
-      compositeStreamRef.current = canvasStream;
+      // Broadcast stream gets the chosen video track (raw screen or
+      // canvas, decided above) + the mixed audio track. We deliberately
+      // do NOT add the raw screen audio tracks here because most
+      // browsers' MediaRecorder only encodes the first audio track, so
+      // adding multiple causes silent loss of mic/soundboard.
+      dest.stream.getAudioTracks().forEach((t) => broadcastStream.addTrack(t));
+      compositeStreamRef.current = broadcastStream;
 
       setIsCapturing(true);
       drawIntervalRef.current = setInterval(drawComposite, DRAW_INTERVAL_MS);
@@ -506,6 +554,16 @@ function ScreenCapture({ streamId }) {
           transportRef.current.close();
           transportRef.current = null;
         }
+      };
+
+      // Surface MediaRecorder failures that would otherwise be silent —
+      // without this handler, mime-type rejection or encoder errors just
+      // stop `ondataavailable` from firing and the user sees an apparently
+      // happy "● LIVE" indicator with nothing actually leaving the browser.
+      recorder.onerror = (e) => {
+        const err = e.error || e;
+        console.error('[stream] MediaRecorder error:', err);
+        setError(`MediaRecorder failed: ${err?.message || 'unknown error'}`);
       };
 
       recorder.start(STREAM_TIMESLICE_MS);
