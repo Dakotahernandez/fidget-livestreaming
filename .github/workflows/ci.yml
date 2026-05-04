@@ -20,10 +20,10 @@ jobs:
 
       - name: Build
         run: |
-          docker compose -f "$COMPOSE_FILE" build
+          docker compose build -f "$COMPOSE_FILE"
 
       - name: Deploy
         if: success()
         run: |
-          docker compose -f "$COMPOSE_FILE" down
-          docker compose -f "$COMPOSE_FILE" up -d --build
+          docker compose down -f "$COMPOSE_FILE" 
+          docker compose up -d --build -f "$COMPOSE_FILE"
