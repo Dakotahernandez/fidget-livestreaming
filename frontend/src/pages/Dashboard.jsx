@@ -12,6 +12,17 @@ import ScreenCapture from '../components/streamer/ScreenCapture';
 /** RTMP ingest URL — points to the media-server container in dev. */
 const RTMP_URL = 'rtmp://localhost:1935/live';
 
+/**
+ * How long a stream must remain `is_live=false` before the dashboard
+ * auto-deletes it. Anything shorter risks pruning a stream the user is
+ * actively broadcasting when the backend's `is_live` flag flickers
+ * (rendition publish hiccup, on_publish_done arriving briefly between
+ * source restarts, etc.). 60s is comfortably longer than any normal
+ * publish gap and short enough that abandoned stream rows still get
+ * cleaned up promptly.
+ */
+const STALE_OFFLINE_GRACE_MS = 60_000;
+
 function Dashboard() {
   const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
@@ -26,10 +37,16 @@ function Dashboard() {
 
   // Stream ids the user just created in this browser session. We keep them
   // visible (so the broadcast panel stays mounted before Go Live) even
-  // though they aren't `is_live` yet. Anything *not* in this set and not
-  // currently live is treated as a stale row and pruned on the next poll.
+  // though they aren't `is_live` yet.
   const recentlyCreatedRef = useRef(new Set());
   const pruningRef = useRef(new Set());
+
+  // Per-stream timestamp of the first poll where we observed the stream
+  // as not-live. Used to give a grace period before auto-pruning so a
+  // transient `is_live=false` blip (e.g., a brief rendition publish drop,
+  // or the gap between create and Go Live after a page reload) doesn't
+  // tear down a stream the user is actively broadcasting.
+  const firstOfflineAtRef = useRef(new Map());
 
   // Redirect to login if not authenticated.
   useEffect(() => {
@@ -56,13 +73,38 @@ function Dashboard() {
 
       if (mineResult.status === 'fulfilled') {
         const allMine = mineResult.value.data || [];
-        // Auto-prune any non-live streams the user didn't just create in
-        // this session. Streams are ephemeral: once a broadcast ends the
-        // record should disappear so the dashboard never accumulates
-        // non-active entries.
-        const stale = allMine.filter(
-          (s) => !s.is_live && !recentlyCreatedRef.current.has(s.id),
-        );
+        const now = Date.now();
+        const presentIds = new Set(allMine.map((s) => s.id));
+
+        // Update the per-stream first-offline timestamps. A stream that
+        // is currently live clears its timestamp; a not-live stream
+        // records `now` if we haven't seen it offline before. Streams
+        // the backend has stopped returning at all are dropped from the
+        // map so it doesn't grow forever.
+        for (const id of Array.from(firstOfflineAtRef.current.keys())) {
+          if (!presentIds.has(id)) firstOfflineAtRef.current.delete(id);
+        }
+        for (const s of allMine) {
+          if (s.is_live) {
+            firstOfflineAtRef.current.delete(s.id);
+          } else if (!firstOfflineAtRef.current.has(s.id)) {
+            firstOfflineAtRef.current.set(s.id, now);
+          }
+        }
+
+        // Auto-prune ephemeral streams: not live, not recently created
+        // in this session, AND have been continuously offline for at
+        // least the grace period. The grace period is what protects the
+        // panel from disappearing on a transient is_live=false blip.
+        const stale = allMine.filter((s) => {
+          if (s.is_live) return false;
+          if (recentlyCreatedRef.current.has(s.id)) return false;
+          const firstOffline = firstOfflineAtRef.current.get(s.id);
+          return (
+            firstOffline !== undefined &&
+            now - firstOffline > STALE_OFFLINE_GRACE_MS
+          );
+        });
         for (const s of stale) {
           if (pruningRef.current.has(s.id)) continue;
           pruningRef.current.add(s.id);
@@ -70,9 +112,20 @@ function Dashboard() {
             .catch(() => { /* best-effort cleanup */ })
             .finally(() => pruningRef.current.delete(s.id));
         }
-        const visible = allMine.filter(
-          (s) => s.is_live || recentlyCreatedRef.current.has(s.id),
-        );
+
+        // Visibility filter mirrors the prune logic: a stream stays
+        // mounted if it's live, was just created, or is still inside
+        // its offline grace window. This avoids the panel flickering
+        // out one poll before deleteStream completes.
+        const visible = allMine.filter((s) => {
+          if (s.is_live) return true;
+          if (recentlyCreatedRef.current.has(s.id)) return true;
+          const firstOffline = firstOfflineAtRef.current.get(s.id);
+          return (
+            firstOffline === undefined ||
+            now - firstOffline <= STALE_OFFLINE_GRACE_MS
+          );
+        });
         setMyStreams(visible);
       } else {
         nextError = 'Failed to load your streams.';

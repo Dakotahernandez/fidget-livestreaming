@@ -1,7 +1,16 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Hls from 'hls.js';
 import { getStream, joinStream, resolvePlaybackRoute } from '../services/api';
+
+// Manual quality selection ladder. Values match the rendition suffixes
+// the backend's ffmpeg pushes to SRS (see backend/src/quic.rs RENDITIONS).
+// "source" means the stream's native resolution with no downscale.
+const QUALITY_OPTIONS = [
+  { value: 'source', label: 'Source (best)' },
+  { value: '480p',   label: '480p' },
+  { value: '360p',   label: '360p' },
+];
 
 const EMPTY_PLAYBACK_METRICS = {
   source: '',
@@ -130,6 +139,23 @@ function Watch() {
   const [joinError, setJoinError] = useState('');
   const [joining, setJoining] = useState(false);
   const [playbackMetrics, setPlaybackMetrics] = useState(EMPTY_PLAYBACK_METRICS);
+  const [quality, setQuality] = useState('source');
+
+  // Derived playback identifiers that fold the user's quality choice into
+  // the URL/stream-key. The player effect keys on these so changing the
+  // dropdown tears down the current WHEP/HLS player and starts a fresh
+  // one against the new rendition.
+  const playbackKey = useMemo(
+    () => (quality === 'source' || !streamKey ? streamKey : `${streamKey}_${quality}`),
+    [streamKey, quality],
+  );
+  const playbackUrl = useMemo(() => {
+    if (!hlsUrl || !streamKey || quality === 'source') return hlsUrl;
+    // Both origin and edge-routed URLs end in `…/hls/<streamKey>/index.m3u8`,
+    // so it's safe to swap just the key segment without re-running the
+    // route lookup.
+    return hlsUrl.replace(`/${streamKey}/`, `/${streamKey}_${quality}/`);
+  }, [hlsUrl, streamKey, quality]);
 
   const updatePlaybackMetrics = useCallback((partial) => {
     setPlaybackMetrics((current) => ({ ...current, ...partial }));
@@ -205,9 +231,12 @@ function Watch() {
   }, [id, unlockStream]);
 
   // Attach a player when a stream URL is available. WHEP is tried first
-  // for sub-second latency; HLS is the always-available fallback.
+  // for sub-second latency; HLS is the always-available fallback. The
+  // effect keys on the playback (rendition-aware) URL/key, so changing
+  // the quality dropdown tears down and re-attaches the player against
+  // the new rendition.
   useEffect(() => {
-    if (!hlsUrl || !videoRef.current) return;
+    if (!playbackUrl || !videoRef.current) return;
 
     const video = videoRef.current;
     const playbackStartedAt = performance.now();
@@ -284,7 +313,7 @@ function Watch() {
           fragLoadingRetryDelay: 500,
           fragLoadingMaxRetryTimeout: 8000,
         });
-        hls.loadSource(hlsUrl);
+        hls.loadSource(playbackUrl);
         hls.attachMedia(video);
 
         // Manual fallback retry loop for when the manifest is still missing
@@ -294,7 +323,7 @@ function Watch() {
           manifestRetryTimer = window.setTimeout(() => {
             manifestRetryTimer = null;
             try {
-              hls.loadSource(hlsUrl);
+              hls.loadSource(playbackUrl);
               hls.startLoad();
             } catch {
               /* destroyed */
@@ -355,7 +384,7 @@ function Watch() {
         };
 
         video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
-        video.src = hlsUrl;
+        video.src = playbackUrl;
         metricTimer = window.setInterval(() => updateBufferMetrics(null), 1000);
       } else {
         setPlayerError('Your browser does not support HLS playback.');
@@ -363,11 +392,13 @@ function Watch() {
     };
 
     // Try WHEP first if we have a stream key and the browser supports
-    // RTCPeerConnection. Falls back to HLS on any failure.
-    if (streamKey && typeof RTCPeerConnection === 'function') {
+    // RTCPeerConnection. Falls back to HLS on any failure. We send the
+    // rendition-suffixed key so SRS serves the WebRTC bridge for the
+    // requested quality, not always the source.
+    if (playbackKey && typeof RTCPeerConnection === 'function') {
       const controller = new AbortController();
       whepAbort = controller;
-      startWhepPlayback({ streamKey, video, signal: controller.signal })
+      startWhepPlayback({ streamKey: playbackKey, video, signal: controller.signal })
         .then((cleanup) => {
           if (cancelled) {
             cleanup();
@@ -408,7 +439,7 @@ function Watch() {
         hlsRef.current = null;
       }
     };
-  }, [hlsUrl, streamKey, updatePlaybackMetrics]);
+  }, [playbackUrl, playbackKey, updatePlaybackMetrics]);
 
   const metricLabel = (value) => (value == null ? '...' : `${value} ms`);
 
@@ -451,10 +482,29 @@ function Watch() {
             </div>
 
             <div className="mt-2">
-              <h2>
-                {stream?.is_live && <span className="live-badge">LIVE</span>}{' '}
-                {stream?.title || 'Loading...'}
-              </h2>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                <h2 style={{ margin: 0 }}>
+                  {stream?.is_live && <span className="live-badge">LIVE</span>}{' '}
+                  {stream?.title || 'Loading...'}
+                </h2>
+                {/* Manual quality selection. Changing this restarts the
+                    player against the rendition's HLS playlist / WHEP
+                    endpoint — there's no auto/ABR, the user picks. */}
+                {hlsUrl && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+                    Quality:
+                    <select
+                      value={quality}
+                      onChange={(e) => setQuality(e.target.value)}
+                      style={{ padding: '0.25rem 0.5rem' }}
+                    >
+                      {QUALITY_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
               <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
                 {stream?.username || (stream ? `User #${stream.user_id}` : '')}
               </p>
