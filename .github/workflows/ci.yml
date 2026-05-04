@@ -1,0 +1,29 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  COMPOSE_FILE: docker-compose.yml
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Cleanup
+        run: |
+          docker system prune -a -f --filter "until=24h"
+
+      - name: Build
+        run: |
+          docker compose -f "$COMPOSE_FILE" build
+
+      - name: Deploy
+        if: success()
+        run: |
+          docker compose -f "$COMPOSE_FILE" down
+          docker compose -f "$COMPOSE_FILE" up -d --build
