@@ -14,6 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Create env file
+        run: | 
+          cp .env.example .env
+        
+
       - name: Cleanup
         run: |
           docker system prune -a -f --filter "until=24h"
