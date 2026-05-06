@@ -114,7 +114,7 @@ async fn get_stream(
 
 /// `POST /api/streams/:id/join` — validate stream access and return playable HLS URL.
 async fn join_stream(
-    State((pool, _config)): State<(PgPool, Config)>,
+    State((pool, config)): State<(PgPool, Config)>,
     Path(id): Path<Uuid>,
     Json(body): Json<JoinStreamRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -137,12 +137,14 @@ async fn join_stream(
         }
     }
 
+    let cloudfront_url = config.cloudfront_url.trim_end_matches('/');
+
     Ok(Json(serde_json::json!({
         "id": s.id,
         "title": s.title,
         "is_live": s.is_live,
         "stream_key": s.stream_key,
-        "hls_url": format!("/hls/{}/index.m3u8", s.stream_key),
+        "hls_url": format!("{}/{}/index.m3u8", cloudfront_url ,s.stream_key),
     })))
 }
 
