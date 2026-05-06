@@ -1,34 +1,60 @@
-name: Build & Deploy
+name: Basic CI/CD
 
 on:
+  pull_request:
+    branches: [main]
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
 
 env:
-  COMPOSE_FILE: docker-compose.yml
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-deploy:
-    runs-on: self-hosted
+  ci:
+    name: CI (Rust + Frontend)
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Create env file
-        run: | 
-          cp .env.example .env
-        
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cleanup
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and test Rust workspace
         run: |
-          docker system prune -a -f --filter "until=24h"
+          cargo build --workspace --locked --verbose
+          cargo test --workspace --locked --verbose
 
-      - name: Build
-        run: |
-          docker compose -f "$COMPOSE_FILE" build
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Deploy
-        if: success()
-        run: |
-          docker compose -f "$COMPOSE_FILE" down
-          docker compose -f "$COMPOSE_FILE" up -d --build
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  cd:
+    name: CD Smoke Check (Compose Build)
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare environment file
+        run: cp .env.example .env
+
+      - name: Build deployable services
+        run: docker compose -f docker-compose.yml build
