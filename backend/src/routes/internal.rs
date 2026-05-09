@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::errors::AppError;
-use crate::models::stream;
+use crate::models::{stream, user};
 
 /// Build the internal RTMP callback router.
 ///
@@ -90,6 +90,24 @@ async fn on_publish(
 
     match stream::find_by_stream_key(&pool, base_key).await? {
         Some(s) => {
+
+            let owner = user::find_by_id(&pool, s.user_id)
+                .await?
+                .ok_or_else(|| AppError::Unauthorized("stream owner not found".to_string()))?;
+
+            if owner.role != "admin" && owner.role != "streamer" {
+                println!("Blocked RTMP publish because stream owner is not allowed to stream");
+
+                tracing::warn!(
+                    stream_key = %stream_key,
+                    owner_id = %s.user_id,
+                    role = %owner.role,
+                    "Rejected RTMP publish because owner role cannot stream"
+                );
+
+                return Ok(StatusCode::FORBIDDEN.into_response());
+            }
+
             // Only the source publish drives is_live — rendition callbacks
             // arrive moments later and would just re-flip an already-live
             // stream, so skip them to keep DB churn down.

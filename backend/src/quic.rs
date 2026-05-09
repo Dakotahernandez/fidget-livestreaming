@@ -6,6 +6,7 @@ use wtransport::{Endpoint, Identity, ServerConfig};
 
 use crate::middleware::auth::Claims;
 use crate::models::stream;
+use crate::quic_chat;
 
 /// Read buffer size for the WebTransport unidirectional stream that carries
 /// the WebM byte stream from the browser. Sized to comfortably hold a
@@ -45,8 +46,10 @@ pub fn start_quic_server(
         .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
         .build();
 
+    let chat_state = quic_chat::ChatState::new();
+
     tokio::spawn(async move {
-        run_quic_server(config, jwt_secret, rtmp_url, pool).await;
+        run_quic_server(config, jwt_secret, rtmp_url, pool, chat_state).await;
     });
 
     cert_hash_hex
@@ -58,6 +61,7 @@ async fn run_quic_server(
     jwt_secret: String,
     rtmp_url: String,
     pool: PgPool,
+    chat_state: quic_chat::ChatState
 ) {
     let server = match Endpoint::server(config) {
         Ok(s) => s,
@@ -73,6 +77,7 @@ async fn run_quic_server(
         let jwt_secret = jwt_secret.clone();
         let rtmp_url = rtmp_url.clone();
         let pool = pool.clone();
+        let chat_state = chat_state.clone();
 
         tokio::spawn(async move {
             let session_request = match incoming_session.await {
@@ -86,6 +91,51 @@ async fn run_quic_server(
             // The browser connects to a URL
             // example ->  https://host:port/ingest/<stream_id>?token=<jwt>
             let path = session_request.path().to_string();
+
+            // added chat connections
+            if let Some((stream_id, token)) = quic_chat::parse_chat_path(&path) {
+                let user_id = match validate_token(&token, &jwt_secret) {
+                    Some(id) => id,
+                    None => {
+                        tracing::warn!("Invalid chat token for stream {stream_id}");
+                        return;
+                    }
+                };
+
+                match stream::find_by_id(&pool, stream_id).await {
+                    Ok(Some(_)) => {}
+                    _ => {
+                        tracing::warn!("Chat stream {stream_id} not found");
+                        return;
+                    }
+                }
+
+                let connection = match session_request.accept().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("Failed to accept WebTransport chat session: {e}");
+                        return;
+                    }
+                };
+
+                tracing::info!(
+                    "WebTransport chat session accepted for stream {stream_id} from {}",
+                    connection.remote_address()
+                );
+
+                quic_chat::handle_chat_session(
+                    connection,
+                    pool,
+                    stream_id,
+                    user_id,
+                    chat_state,
+                )
+                .await;
+
+                return;
+            }
+            
+            // stream connections
             let (stream_id, token) = match parse_ingest_path(&path) {
                 Some(v) => v,
                 None => {

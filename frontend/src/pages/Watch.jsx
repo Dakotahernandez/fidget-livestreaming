@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom';
 import Hls from 'hls.js';
 import { getStream, joinStream, resolvePlaybackRoute } from '../services/api';
+import StreamChat from '../components/chat/StreamChat';
 
 // Manual quality selection ladder. Values match the rendition suffixes
 // the backend's ffmpeg pushes to SRS (see backend/src/quic.rs RENDITIONS).
@@ -523,6 +524,7 @@ function Watch() {
           </>
         )}
       </div>
+      <StreamChat streamId={id} />
     </div>
   );
 }

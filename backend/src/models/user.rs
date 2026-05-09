@@ -84,3 +84,42 @@ pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<User>, AppErro
 
     Ok(user)
 }
+
+
+/// Return all users.
+pub async fn list_users(pool: &PgPool) -> Result<Vec<User>, AppError> {
+    let users = sqlx::query_as::<_, User>(
+        r#"
+        SELECT id, username, email, password_hash, role, created_at
+        FROM users
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(users)
+}
+
+/// Update a user's role.
+pub async fn update_role(
+    pool: &PgPool,
+    id: Uuid,
+    role: &str,
+) -> Result<User, AppError> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET role = $1
+        WHERE id = $2
+        RETURNING id, username, email, password_hash, role, created_at
+        "#,
+    )
+    .bind(role)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("user not found".to_string()))?;
+
+    Ok(user)
+}

@@ -24,7 +24,7 @@ const RTMP_URL = 'rtmp://localhost:1935/live';
 const STALE_OFFLINE_GRACE_MS = 60_000;
 
 function Dashboard() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
 
   const [myStreams, setMyStreams] = useState([]);
@@ -47,6 +47,8 @@ function Dashboard() {
   // or the gap between create and Go Live after a page reload) doesn't
   // tear down a stream the user is actively broadcasting.
   const firstOfflineAtRef = useRef(new Map());
+
+  const canStream = user?.role === 'admin' || user?.role === 'streamer';
 
   // Redirect to login if not authenticated.
   useEffect(() => {
@@ -178,43 +180,52 @@ function Dashboard() {
 
       {error && <p className="error-msg mt-1">{error}</p>}
 
-      <div className="dashboard-section mt-2">
-        <h3>Create a New Stream</h3>
-        <form onSubmit={handleCreate} style={{ display: 'flex', gap: '0.5rem' }}>
-          <input
-            type="text"
-            placeholder="Stream title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            style={{
-              flex: 1,
-              padding: '0.5rem 0.75rem',
-              background: 'var(--color-bg)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius)',
-              color: 'var(--color-text)',
-            }}
-          />
-          <input
-            type="password"
-            placeholder="Optional stream password"
-            value={accessPassword}
-            onChange={(e) => setAccessPassword(e.target.value)}
-            style={{
-              flex: 1,
-              padding: '0.5rem 0.75rem',
-              background: 'var(--color-bg)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius)',
-              color: 'var(--color-text)',
-            }}
-          />
-          <button className="btn" type="submit">Create</button>
-        </form>
-        <p className="mt-1" style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
-          Leave password blank to create a public stream.
+
+      {user?.role === 'viewer' && (
+        <p className="mt-1" style={{ color: 'var(--color-text-muted)' }}>
+          You are signed in as a viewer. You can watch live streams, but you cannot create streams.
         </p>
-      </div>
+      )}
+
+      {canStream &&(
+        <div className="dashboard-section mt-2">
+          <h3>Create a New Stream</h3>
+          <form onSubmit={handleCreate} style={{ display: 'flex', gap: '0.5rem' }}>
+            <input
+              type="text"
+              placeholder="Stream title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              style={{
+                flex: 1,
+                padding: '0.5rem 0.75rem',
+                background: 'var(--color-bg)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius)',
+                color: 'var(--color-text)',
+              }}
+            />
+            <input
+              type="password"
+              placeholder="Optional stream password"
+              value={accessPassword}
+              onChange={(e) => setAccessPassword(e.target.value)}
+              style={{
+                flex: 1,
+                padding: '0.5rem 0.75rem',
+                background: 'var(--color-bg)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius)',
+                color: 'var(--color-text)',
+              }}
+            />
+            <button className="btn" type="submit">Create</button>
+          </form>
+          <p className="mt-1" style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+            Leave password blank to create a public stream.
+          </p>
+        </div>
+      )}
 
       <div className="dashboard-section mt-2">
         <h3>Live Now (All Users)</h3>
@@ -248,7 +259,7 @@ function Dashboard() {
 
       {loading && <p className="text-center mt-2">Loading…</p>}
 
-      {myStreams.map((stream) => (
+      {canStream && myStreams.map((stream) => (
         <div className="dashboard-section" key={stream.id}>
           <h3>
             {stream.title || 'Untitled Stream'}{' '}
@@ -295,7 +306,7 @@ function Dashboard() {
         </div>
       ))}
 
-      {!loading && myStreams.length === 0 && (
+      {canStream && !loading && myStreams.length === 0 && (
         <p className="text-center mt-2" style={{ color: 'var(--color-text-muted)' }}>
           You don&apos;t have any streams yet. Create one above!
         </p>

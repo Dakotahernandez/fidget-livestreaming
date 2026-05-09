@@ -79,4 +79,24 @@ export const getTransportUrl = (streamId) => {
   return `https://${host}:${quicPort}/ingest/${streamId}?token=${token}`;
 };
 
+// ── Admin endpoints ─────────────────────────────────────────────────
+export const listUsers = () =>
+  api.get('/admin/users');
+
+export const updateUserRole = (id, role) =>
+  api.patch(`/admin/users/${id}/role`, { role });
+
+
+// ── Chat endpoints ───────────────────────────────────────────────────
+export const listChatMessages = (streamId) =>
+  api.get(`/chat/streams/${streamId}/messages`);
+
+export const getChatTransportUrl = (streamId) => {
+  const token = getStoredToken();
+  const host = window.location.hostname;
+  const quicPort = 4443;
+  return `https://${host}:${quicPort}/chat/${streamId}?token=${token}`;
+};
+
+
 export default api;

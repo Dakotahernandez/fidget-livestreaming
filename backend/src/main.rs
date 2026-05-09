@@ -5,6 +5,7 @@ mod models;
 mod routes;
 mod middleware;
 mod quic;
+mod quic_chat;
 
 use axum::{routing::get, Extension, Json, Router};
 use serde_json::json;
@@ -51,6 +52,8 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health_check))
         .nest("/api/auth", routes::auth::router())
+        .nest("/api/admin", routes::admin::router())
+        .nest("/api/chat", routes::chat::router())
         .nest("/api/streams", routes::streams::router())
         .nest("/api/internal/rtmp", routes::internal::router())
         .nest("/api/config", routes::config::router())

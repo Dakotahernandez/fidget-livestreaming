@@ -8,6 +8,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Watch from './pages/Watch';
+import AdminUsers from './pages/AdminUsers';
 
 /** Top-level nav bar — adapts based on auth state. */
 function Navbar() {
@@ -27,6 +28,9 @@ function Navbar() {
         <Link to="/">Home</Link>
         {isAuthenticated ? (
           <>
+            {user?.role === 'admin' && (
+              <Link to="/admin/users">Manage Users</Link>
+            )}
             <Link to="/dashboard">Dashboard</Link>
             <span style={{ color: 'var(--color-text-secondary)', fontSize: '0.85rem' }}>
               {user?.username}
@@ -55,6 +59,7 @@ function App() {
           <Route path="/register" element={<Register />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/watch/:id" element={<Watch />} />
+          <Route path="/admin/users" element={<AdminUsers />} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

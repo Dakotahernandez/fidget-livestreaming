@@ -30,5 +30,20 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+        sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            stream_id UUID NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CHECK (char_length(message) > 0 AND char_length(message) <= 500)
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+    
     Ok(pool)
 }

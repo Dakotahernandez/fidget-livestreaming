@@ -35,6 +35,7 @@ async fn register(
         "token": token,
         "user_id": new_user.id,
         "username": new_user.username,
+        "role": new_user.role,
     })))
 }
 
@@ -60,5 +61,6 @@ async fn login(
         "token": token,
         "user_id": stored.id,
         "username": stored.username,
+        "role": stored.role,
     })))
 }

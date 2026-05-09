@@ -32,14 +32,22 @@ export function AuthProvider({ children }) {
   const loginUser = useCallback(async (username, password) => {
     const res = await apiLogin(username, password);
     setToken(res.data.token);
-    setUser({ username, id: res.data.user_id });
+    setUser({
+      id: res.data.user_id,
+      username: res.data.username,
+      role: res.data.role,
+    });
     return res.data;
   }, []);
 
   const registerUser = useCallback(async (username, password) => {
     const res = await apiRegister(username, password);
     setToken(res.data.token);
-    setUser({ username, id: res.data.user_id });
+    setUser({
+      id: res.data.user_id,
+      username: res.data.username,
+      role: res.data.role,
+    });
     return res.data;
   }, []);
 

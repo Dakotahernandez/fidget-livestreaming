@@ -160,15 +160,14 @@ pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
 /// can prune old stream records from the dashboard with this; the row is
 /// gone for good (each new "Go Live" creates a fresh record via the create
 /// endpoint).
-pub async fn delete_stream(pool: &PgPool, id: Uuid, user_id: Uuid) -> Result<u64, AppError> {
+pub async fn delete_stream(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
     let result = sqlx::query(
         r#"
         DELETE FROM streams
-        WHERE id = $1 AND user_id = $2
+        WHERE id = $1
         "#,
     )
     .bind(id)
-    .bind(user_id)
     .execute(pool)
     .await?;
 
