@@ -98,5 +98,17 @@ export const getChatTransportUrl = (streamId) => {
   return `https://${host}:${quicPort}/chat/${streamId}?token=${token}`;
 };
 
+// WebSocket fallback for browsers without WebTransport (Firefox, Safari).
+// Same-origin upgrade through the frontend nginx so it inherits the page's
+// HTTPS and avoids cross-origin restrictions.
+export const getChatWebSocketUrl = (streamId) => {
+  const token = getStoredToken();
+  if (!token) {
+    return null;
+  }
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${window.location.host}/api/chat/streams/${streamId}/ws?token=${encodeURIComponent(token)}`;
+};
+
 
 export default api;

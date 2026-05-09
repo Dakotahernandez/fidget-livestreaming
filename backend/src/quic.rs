@@ -23,6 +23,7 @@ pub fn start_quic_server(
     jwt_secret: String,
     rtmp_url: String,
     pool: PgPool,
+    chat_state: quic_chat::ChatState,
 ) -> String {
     let identity =
         Identity::self_signed(["localhost", "127.0.0.1", "::1"]).expect("failed to create self-signed identity");
@@ -45,8 +46,6 @@ pub fn start_quic_server(
         .with_identity(identity)
         .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
         .build();
-
-    let chat_state = quic_chat::ChatState::new();
 
     tokio::spawn(async move {
         run_quic_server(config, jwt_secret, rtmp_url, pool, chat_state).await;

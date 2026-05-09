@@ -27,7 +27,7 @@ impl ChatState {
         }
     }
 
-    async fn sender_for_stream(&self, stream_id: Uuid) -> broadcast::Sender<chat::ChatMessage> {
+    pub async fn sender_for_stream(&self, stream_id: Uuid) -> broadcast::Sender<chat::ChatMessage> {
         let mut channels = self.channels.lock().await;
 
         channels
@@ -40,10 +40,70 @@ impl ChatState {
     }
 }
 
+/// Maximum message length in characters
+pub const MAX_CHAT_MESSAGE_CHARS: usize = 500;
+
 /// frontend to backend message
 #[derive(Debug, Deserialize)]
-struct IncomingChatMessage {
-    message: String,
+pub struct IncomingChatMessage {
+    pub message: String,
+}
+
+/// Persist a single incoming line, broadcast it to all subscribers.
+///
+/// Used by both the WebTransport and WebSocket chat handlers so the
+/// validation, persistence, and fan-out behaviour stays the same
+/// across methods
+pub async fn process_incoming_line(
+    pool: &sqlx::PgPool,
+    channel: &broadcast::Sender<chat::ChatMessage>,
+    stream_id: Uuid,
+    user_id: Uuid,
+    line: &str,
+) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+
+    let incoming: IncomingChatMessage = match serde_json::from_str(line) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            tracing::warn!(
+                stream_id = %stream_id,
+                user_id = %user_id,
+                "Invalid chat JSON: {e}"
+            );
+            return;
+        }
+    };
+
+    let message = incoming.message.trim();
+    if message.is_empty() {
+        return;
+    }
+
+    if message.chars().count() > MAX_CHAT_MESSAGE_CHARS {
+        tracing::warn!(
+            stream_id = %stream_id,
+            user_id = %user_id,
+            "Rejected chat message over {MAX_CHAT_MESSAGE_CHARS} characters"
+        );
+        return;
+    }
+
+    match chat::insert_message(pool, stream_id, user_id, message).await {
+        Ok(saved) => {
+            let _ = channel.send(saved);
+        }
+        Err(e) => {
+            tracing::error!(
+                stream_id = %stream_id,
+                user_id = %user_id,
+                "Failed to save chat message: {e}"
+            );
+        }
+    }
 }
 
 /// Parse `/chat/<uuid>?token=<jwt>` 
@@ -152,45 +212,7 @@ pub async fn handle_chat_session(
 
 				while let Some(newline_index) = pending.find('\n') {
 					let line: String = pending.drain(..=newline_index).collect();
-					let line = line.trim();
-
-					if !line.is_empty() {
-						match serde_json::from_str::<IncomingChatMessage>(line) {
-							Ok(incoming) => {
-								let message = incoming.message.trim();
-
-                                if !message.is_empty() {
-                                    if message.chars().count() > 500 {
-                                        tracing::warn!(
-                                            stream_id = %stream_id,
-                                            user_id = %user_id,
-                                            "Rejected chat message over 500 characters"
-                                        );
-                                    } else {
-                                        match chat::insert_message(&pool, stream_id, user_id, message).await {
-                                            Ok(saved) => {
-                                                let _ = channel.send(saved);
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    stream_id = %stream_id,
-                                                    user_id = %user_id,
-                                                    "Failed to save chat message: {e}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-							}
-							Err(e) => {
-								tracing::warn!(
-									stream_id = %stream_id,
-									user_id = %user_id,
-									"Invalid chat JSON: {e}"
-								);
-							}
-						}
-					}
+					process_incoming_line(&pool, &channel, stream_id, user_id, &line).await;
 				}
 			}
 			Err(e) => {

@@ -34,11 +34,14 @@ async fn main() {
 
     tracing::info!("Database connected");
 
+    let chat_state = quic_chat::ChatState::new();
+
     let cert_hash = quic::start_quic_server(
         cfg.quic_port,
         cfg.jwt_secret.clone(),
         cfg.rtmp_url.clone(),
         pool.clone(),
+        chat_state.clone(),
     );
     let cert_hash = Arc::new(cert_hash);
 
@@ -60,6 +63,7 @@ async fn main() {
         .route("/api/transport/cert-hash", get(routes::ingest::cert_hash))
         .layer(Extension(cfg.jwt_secret.clone()))
         .layer(Extension(cert_hash))
+        .layer(Extension(chat_state))
         .layer(cors)
         .with_state(state);
 
