@@ -1,5 +1,6 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { getCertHash, getTransportUrl } from '../../services/api';
+import { getCertHash, getTransportUrl, openAlertStream } from '../../services/api';
+import useDonationOverlay from '../donation/DonationOverlay';
 
 // WebM/VP8 is preferred for canvas captureStream sources because
 // MediaRecorder emits one cluster per timeslice without needing
@@ -69,6 +70,43 @@ function ScreenCapture({ streamId }) {
 
   const webcamOnRef = useRef(false);
   useEffect(() => { webcamOnRef.current = webcamOn; }, [webcamOn]);
+
+  const { show: showDonationOverlay, overlay: donationOverlayNode } = useDonationOverlay();
+
+  // Donation alert SSE listener — mounted only while broadcasting.
+  // The streamer's overlay is React DOM (not burned into the canvas),
+  // and the alert sound is fed through the existing audio mixer via
+  // `playSound` so it goes out on the broadcast track.
+  useEffect(() => {
+    if (!isStreaming || !streamId) return undefined;
+    const es = openAlertStream(streamId);
+    es.onmessage = (e) => {
+      try {
+        const alert = JSON.parse(e.data);
+        if (alert.type !== 'donation_alert') return;
+        showDonationOverlay(alert);
+        if (!alert.sound_url) return;
+        // SECURITY: refuse any sound_url that doesn't live under our
+        // own /uploads/ mount. Belt-and-suspenders against a future
+        // backend bug that lets an external URL slip into the payload.
+        if (!alert.sound_url.startsWith('/uploads/')) {
+          console.warn('rejecting non-/uploads sound_url', alert.sound_url);
+          return;
+        }
+        const ctx = audioCtxRef.current;
+        if (!ctx) return;
+        fetch(alert.sound_url)
+          .then((r) => r.arrayBuffer())
+          .then((buf) => ctx.decodeAudioData(buf.slice(0)))
+          .then((decoded) => {
+            soundBuffersRef.current.set('__donation__', decoded);
+            playSoundRef.current?.('__donation__');
+          })
+          .catch(() => { /* swallow — alert is best-effort */ });
+      } catch { /* ignore malformed payloads */ }
+    };
+    return () => { es.close(); };
+  }, [isStreaming, streamId, showDonationOverlay]);
 
   const webTransportSupported = typeof globalThis.WebTransport === 'function';
 
@@ -396,6 +434,11 @@ function ScreenCapture({ streamId }) {
     src.start();
   }, []);
 
+  // Keep a ref to the latest playSound so the donation SSE useEffect can
+  // call it without re-subscribing whenever React re-creates the callback.
+  const playSoundRef = useRef(playSound);
+  useEffect(() => { playSoundRef.current = playSound; }, [playSound]);
+
   // Decode an uploaded audio file (mp3, wav, ogg, m4a, etc) into an
   // AudioBuffer and add it to the soundboard. The buffer lives only in
   // memory; nothing is uploaded to the server. Audio rides through the
@@ -625,6 +668,7 @@ function ScreenCapture({ streamId }) {
 
   return (
     <div className="mt-2">
+      {donationOverlayNode}
       <h4 style={{ marginBottom: '0.5rem' }}>Screen Capture Preview</h4>
       <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '0.75rem' }}>
         Test your screen, window, or game capture before going live. Toggle webcam to overlay your

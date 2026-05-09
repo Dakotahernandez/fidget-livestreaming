@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/fidget-backend .
+RUN mkdir -p /app/uploads
 
 EXPOSE 8080
 CMD ["./fidget-backend"]

@@ -3,3 +3,8 @@ pub mod ingest;
 pub mod internal;
 pub mod streams;
 pub mod config;
+pub mod alerts;
+pub mod connect;
+pub mod donations;
+pub mod sounds;
+pub mod webhooks;

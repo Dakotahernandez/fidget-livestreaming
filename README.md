@@ -36,6 +36,45 @@ Unless you get specific approval otherwise, your project **must** include some c
 - You must meet with Dr. Freeman within the first 3 weeks to give a status update and discuss roadblocks
 - See the course schedule spreadhseet for specific dates
 
+## Donations setup (Stripe — test mode)
+
+The donation flow uses Stripe Connect (Express accounts + Account Links) so each
+streamer's payments land in their own Stripe-managed balance. The platform takes
+a 15% application fee; the streamer keeps the remaining 85%. **Stripe's processing
+fees come out of the platform's 15%, not the streamer's payout.**
+
+> **Test mode only.** Going live requires additional KYC, terms, and tax
+> compliance work that this project does not implement. Do not enable live mode.
+
+### Required environment variables (add to `.env`)
+
+```
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_CLIENT_ID=ca_...
+FRONTEND_URL=http://localhost:5173
+UPLOAD_DIR=/app/uploads
+```
+
+`STRIPE_CLIENT_ID` is reserved for a future Standard-account OAuth flow; the
+current Express + Account Links onboarding does not use it but the variable is
+read at startup so misconfigured deployments are caught early.
+
+### Local webhook forwarding
+
+Run the Stripe CLI in a separate terminal so `checkout.session.completed`
+events reach the backend:
+
+```
+stripe listen --forward-to localhost:8080/api/stripe/webhook
+```
+
+The CLI prints a `whsec_...` signing secret on first run — paste it into
+`STRIPE_WEBHOOK_SECRET` in `.env` and restart the backend.
+
+Donation alerts (overlay + sound) are fired **only** by the verified webhook,
+never by checkout button clicks or Stripe's `?donation=success` redirect.
+
 ## Project Ideas
 - Simulate UDP packet loss and packet corruption in BearTV in a non-deterministic way (i.e., don't just drop every Nth packet). Then, extend the application protocol to be able to detect and handle this packet loss.
 - Extend the BearTV protocol to support streaming images (or video!) alongside the CC data, and visually display them on the client. This should be done in such a way that it is safely deliver*able* over *any* implementation of IPv4. The images don't have to be relevant to the caption data--you can get them randomly on the server from some image source.

@@ -5,6 +5,7 @@ networks:
 volumes:
   pg_data:
   hls_segments:
+  upload_data:
 
 services:
   db:
@@ -32,6 +33,8 @@ services:
     ports:
       - "8080:8080"
       - "4443:4443/udp"
+    volumes:
+      - upload_data:/app/uploads
     networks:
       - fidget-net
 

@@ -72,6 +72,36 @@ export const deleteStream = (id) =>
 export const getCertHash = () =>
   api.get('/transport/cert-hash');
 
+// ── Stripe Connect (streamer onboarding) ─────────────────────────────
+export const getConnectStatus = () =>
+  api.get('/connect/status');
+
+export const startOnboarding = () =>
+  api.post('/connect/onboard');
+
+// ── Donation sound library ───────────────────────────────────────────
+export const listSounds = (streamId) =>
+  api.get(`/sounds`, { params: { stream_id: streamId } });
+
+// `formData` should already be a FormData with `display_name` text and
+// `file` audio file; let axios infer the multipart boundary header.
+export const uploadSound = (formData) =>
+  api.post('/sounds', formData);
+
+export const deleteSound = (soundId) =>
+  api.delete(`/sounds/${soundId}`);
+
+// ── Donations ────────────────────────────────────────────────────────
+export const createCheckout = (payload) =>
+  api.post('/donations/checkout', payload);
+
+export const getDonationHistory = (streamerId) =>
+  api.get('/donations', { params: { streamer_id: streamerId } });
+
+// SSE alert stream — caller owns the EventSource lifecycle.
+export const openAlertStream = (streamId) =>
+  new EventSource(`/api/alerts/${streamId}`);
+
 export const getTransportUrl = (streamId) => {
   const token = getStoredToken();
   const host = window.location.hostname;

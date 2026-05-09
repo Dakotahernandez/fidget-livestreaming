@@ -1,7 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import Hls from 'hls.js';
-import { getStream, joinStream, resolvePlaybackRoute } from '../services/api';
+import {
+  createCheckout,
+  getStream,
+  joinStream,
+  listSounds,
+  openAlertStream,
+  resolvePlaybackRoute,
+} from '../services/api';
+import useDonationOverlay from '../components/donation/DonationOverlay';
 
 // Manual quality selection ladder. Values match the rendition suffixes
 // the backend's ffmpeg pushes to SRS (see backend/src/quic.rs RENDITIONS).
@@ -127,6 +135,7 @@ async function startWhepPlayback({ streamKey, video, signal }) {
  */
 function Watch() {
   const { id } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
 
@@ -140,6 +149,18 @@ function Watch() {
   const [joining, setJoining] = useState(false);
   const [playbackMetrics, setPlaybackMetrics] = useState(EMPTY_PLAYBACK_METRICS);
   const [quality, setQuality] = useState('source');
+
+  // ── Donation panel state ──────────────────────────────────────────
+  const [donorName, setDonorName] = useState('');
+  const [amountCents, setAmountCents] = useState(500);
+  const [customAmountDollars, setCustomAmountDollars] = useState('');
+  const [selectedSoundId, setSelectedSoundId] = useState('');
+  const [sounds, setSounds] = useState([]);
+  const [donationError, setDonationError] = useState('');
+  const [donationBusy, setDonationBusy] = useState(false);
+  const [donationBanner, setDonationBanner] = useState('');
+
+  const { show: showDonationOverlay, overlay: donationOverlayNode } = useDonationOverlay();
 
   // Derived playback identifiers that fold the user's quality choice into
   // the URL/stream-key. The player effect keys on these so changing the
@@ -443,9 +464,114 @@ function Watch() {
 
   const metricLabel = (value) => (value == null ? '...' : `${value} ms`);
 
+  // ── Donation banner from Stripe redirect ────────────────────────
+  useEffect(() => {
+    const status = searchParams.get('donation');
+    if (status === 'success') {
+      setDonationBanner('Thanks for donating! Your support means the world.');
+    } else if (status === 'cancelled') {
+      setDonationBanner('Donation cancelled.');
+    } else {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('donation');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  // ── Sound picker for donors ─────────────────────────────────────
+  useEffect(() => {
+    if (!stream?.is_live) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await listSounds(id);
+        if (!cancelled) setSounds(res.data || []);
+      } catch {
+        if (!cancelled) setSounds([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [stream?.is_live, id]);
+
+  // ── SSE alert listener ──────────────────────────────────────────
+  // Mounts only while the stream is live. The webhook handler is the
+  // sole source of `donation_alert` events, so this is guaranteed not
+  // to fire on cancellation, button clicks, or Stripe redirects.
+  useEffect(() => {
+    if (!stream?.is_live) return undefined;
+    const es = openAlertStream(id);
+    es.onmessage = (e) => {
+      try {
+        const alert = JSON.parse(e.data);
+        if (alert.type === 'donation_alert') {
+          showDonationOverlay(alert);
+          if (alert.sound_url) {
+            // SECURITY: Only ever load audio that lives under our own
+            // /uploads/ mount. The SSE payload is server-signed by
+            // virtue of coming from our backend, but defense-in-depth
+            // means we still refuse any sound_url that points elsewhere
+            // so a future bug in the webhook handler can't turn a tip
+            // into a drive-by load of an arbitrary URL.
+            if (!alert.sound_url.startsWith('/uploads/')) {
+              console.warn('rejecting non-/uploads sound_url', alert.sound_url);
+              return;
+            }
+            // Viewer-side playback comes from the donor's own browser
+            // since the broadcast audio mix is the streamer's only.
+            new Audio(alert.sound_url).play().catch(() => {});
+          }
+        }
+      } catch { /* ignore malformed payloads */ }
+    };
+    return () => { es.close(); };
+  }, [stream?.is_live, id, showDonationOverlay]);
+
+  // ── Donate handler ──────────────────────────────────────────────
+  const handleDonate = async () => {
+    setDonationError('');
+    const trimmedName = donorName.trim();
+    if (!trimmedName) {
+      setDonationError('Please enter a donor name.');
+      return;
+    }
+    if (trimmedName.length > 50) {
+      setDonationError('Donor name is too long (50 chars max).');
+      return;
+    }
+    let cents = amountCents;
+    if (customAmountDollars !== '') {
+      const dollars = parseInt(customAmountDollars, 10);
+      if (!Number.isFinite(dollars) || dollars < 1) {
+        setDonationError('Custom amount must be at least $1 (whole dollars).');
+        return;
+      }
+      cents = dollars * 100;
+    }
+    setDonationBusy(true);
+    try {
+      const res = await createCheckout({
+        stream_id: id,
+        donor_name: trimmedName,
+        amount_cents: cents,
+        sound_id: selectedSoundId || null,
+      });
+      const url = res.data?.checkout_url;
+      if (!url) throw new Error('no checkout url');
+      window.location.assign(url);
+    } catch (err) {
+      setDonationError(err.response?.data?.error || 'Could not start checkout.');
+      setDonationBusy(false);
+    }
+  };
+
   return (
     <div className="page">
+      {donationOverlayNode}
       <div className="watch-container">
+        {donationBanner && (
+          <div className="donation-banner">{donationBanner}</div>
+        )}
         {error && <p className="error-msg">{error}</p>}
 
         {!error && (
@@ -520,6 +646,91 @@ function Watch() {
                 <p>Buffered ahead: {metricLabel(playbackMetrics.bufferMs)}</p>
               </div>
             </div>
+
+            {stream?.is_live && (
+              <div className="donation-panel">
+                <h3 style={{ marginTop: 0 }}>Send a donation</h3>
+                <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                  85% goes to the streamer. Test mode only.
+                </p>
+                <input
+                  type="text"
+                  placeholder="Your name"
+                  value={donorName}
+                  onChange={(e) => setDonorName(e.target.value)}
+                  maxLength={50}
+                  style={{ width: '100%', padding: '0.5rem', marginTop: '0.5rem' }}
+                />
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                  {[100, 200, 500, 1000].map((cents) => (
+                    <button
+                      key={cents}
+                      type="button"
+                      className={`btn ${amountCents === cents && !customAmountDollars ? '' : 'btn--outline'}`}
+                      onClick={() => {
+                        setAmountCents(cents);
+                        setCustomAmountDollars('');
+                      }}
+                    >
+                      ${cents / 100}
+                    </button>
+                  ))}
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="Custom $"
+                    value={customAmountDollars}
+                    onChange={(e) => setCustomAmountDollars(e.target.value.replace(/[^\d]/g, ''))}
+                    style={{ width: '120px', padding: '0.5rem' }}
+                  />
+                </div>
+                {sounds.length > 0 && (
+                  <select
+                    value={selectedSoundId}
+                    onChange={(e) => setSelectedSoundId(e.target.value)}
+                    style={{ width: '100%', padding: '0.5rem', marginTop: '0.5rem' }}
+                  >
+                    <option value="">No sound (—)</option>
+                    {sounds.map((s) => (
+                      <option key={s.id} value={s.id}>{s.display_name}</option>
+                    ))}
+                  </select>
+                )}
+                {/* SECURITY: client-side amount/name guards mirror the
+                    server validation in donations.rs. The server is still
+                    the real authority — these checks just keep the donor
+                    from making a doomed round-trip and disable the button
+                    for amounts the server would reject anyway. */}
+                {(() => null)()}
+                {(() => {
+                  const effectiveCents = customAmountDollars !== ''
+                    ? (Number.isInteger(parseInt(customAmountDollars, 10))
+                        ? parseInt(customAmountDollars, 10) * 100
+                        : 0)
+                    : amountCents;
+                  const trimmed = donorName.trim();
+                  const disabled =
+                    donationBusy ||
+                    !trimmed ||
+                    trimmed.length > 100 ||
+                    effectiveCents < 100 ||
+                    effectiveCents > 1_000_000;
+                  return (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={handleDonate}
+                      disabled={disabled}
+                      style={{ marginTop: '0.5rem' }}
+                    >
+                      {donationBusy ? 'Redirecting…' : 'Donate'}
+                    </button>
+                  );
+                })()}
+                {donationError && <p className="error-msg mt-1">{donationError}</p>}
+              </div>
+            )}
           </>
         )}
       </div>

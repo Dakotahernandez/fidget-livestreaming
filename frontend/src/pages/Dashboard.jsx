@@ -1,11 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
 import {
   createStream,
   deleteStream,
+  deleteSound,
+  getConnectStatus,
+  getDonationHistory,
   listMyStreams,
+  listSounds,
   listStreams,
+  startOnboarding,
+  uploadSound,
 } from '../services/api';
 import ScreenCapture from '../components/streamer/ScreenCapture';
 
@@ -24,8 +30,9 @@ const RTMP_URL = 'rtmp://localhost:1935/live';
 const STALE_OFFLINE_GRACE_MS = 60_000;
 
 function Dashboard() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [myStreams, setMyStreams] = useState([]);
   const [liveStreams, setLiveStreams] = useState([]);
@@ -34,6 +41,30 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showKey, setShowKey] = useState({});
+
+  // Stripe Connect onboarding state.
+  const [connect, setConnect] = useState({ onboarded: false, account_id: null, loaded: false });
+  const [connectError, setConnectError] = useState('');
+  const [connectBusy, setConnectBusy] = useState(false);
+  const [connectToast, setConnectToast] = useState('');
+
+  // Donation sound library state.
+  const [sounds, setSounds] = useState([]);
+  const [soundError, setSoundError] = useState('');
+  const [soundDisplayName, setSoundDisplayName] = useState('');
+  const soundFileInputRef = useRef(null);
+  const [uploadingSound, setUploadingSound] = useState(false);
+  const SOUNDS_MAX = 10;
+
+  // Donation history state.
+  const [donationHistory, setDonationHistory] = useState([]);
+
+  // Pick the first owned stream as the "active" id for sound listing.
+  // Sound library is per-streamer, but `listSounds` is keyed by stream
+  // for unauthenticated viewers; reuse it here so the streamer sees the
+  // same list a donor would.
+  const activeStream = myStreams.find((s) => s.is_live) || myStreams[0];
+  const activeStreamId = activeStream?.id;
 
   // Stream ids the user just created in this browser session. We keep them
   // visible (so the broadcast panel stays mounted before Go Live) even
@@ -170,6 +201,119 @@ function Dashboard() {
   const toggleShowKey = (id) =>
     setShowKey((prev) => ({ ...prev, [id]: !prev[id] }));
 
+  // ── Stripe Connect ────────────────────────────────────────────────
+  // Initial fetch on mount + auto-refresh after a successful onboarding
+  // redirect (`?connect=success`). The backend re-queries Stripe so the
+  // local `stripe_onboarding_complete` flag flips as soon as
+  // `charges_enabled` does.
+  const refreshConnectStatus = React.useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await getConnectStatus();
+      setConnect({ ...res.data, loaded: true });
+    } catch {
+      setConnect((prev) => ({ ...prev, loaded: true }));
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    refreshConnectStatus();
+  }, [refreshConnectStatus]);
+
+  useEffect(() => {
+    if (searchParams.get('connect') === 'success') {
+      setConnectToast('Payments enabled! Welcome to monetization.');
+      refreshConnectStatus();
+      // Clean the URL so a refresh doesn't re-show the toast.
+      const next = new URLSearchParams(searchParams);
+      next.delete('connect');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams, refreshConnectStatus]);
+
+  const handleStartOnboarding = async () => {
+    setConnectError('');
+    setConnectBusy(true);
+    try {
+      const res = await startOnboarding();
+      const url = res.data?.url;
+      if (!url) throw new Error('no onboarding url');
+      window.location.assign(url);
+    } catch (err) {
+      setConnectError(err.response?.data?.error || 'Could not start onboarding.');
+      setConnectBusy(false);
+    }
+  };
+
+  // ── Donation sound library ────────────────────────────────────────
+  const refreshSounds = React.useCallback(async () => {
+    if (!activeStreamId || !connect.onboarded) return;
+    try {
+      const res = await listSounds(activeStreamId);
+      setSounds(res.data || []);
+    } catch {
+      setSounds([]);
+    }
+  }, [activeStreamId, connect.onboarded]);
+
+  useEffect(() => {
+    refreshSounds();
+  }, [refreshSounds]);
+
+  const handleUploadSound = async (e) => {
+    e.preventDefault();
+    setSoundError('');
+    const file = soundFileInputRef.current?.files?.[0];
+    const name = soundDisplayName.trim();
+    if (!name) {
+      setSoundError('Display name is required.');
+      return;
+    }
+    if (!file) {
+      setSoundError('Pick an audio file to upload.');
+      return;
+    }
+    const formData = new FormData();
+    formData.append('display_name', name);
+    formData.append('file', file);
+    setUploadingSound(true);
+    try {
+      await uploadSound(formData);
+      setSoundDisplayName('');
+      if (soundFileInputRef.current) soundFileInputRef.current.value = '';
+      await refreshSounds();
+    } catch (err) {
+      setSoundError(err.response?.data?.error || 'Upload failed.');
+    } finally {
+      setUploadingSound(false);
+    }
+  };
+
+  const handleDeleteSound = async (id) => {
+    setSoundError('');
+    try {
+      await deleteSound(id);
+      await refreshSounds();
+    } catch (err) {
+      setSoundError(err.response?.data?.error || 'Delete failed.');
+    }
+  };
+
+  // ── Donation history ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!user?.id || !connect.onboarded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getDonationHistory(user.id);
+        if (!cancelled) setDonationHistory(res.data || []);
+      } catch {
+        if (!cancelled) setDonationHistory([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, connect.onboarded]);
+
   if (!isAuthenticated) return null;
 
   return (
@@ -177,6 +321,140 @@ function Dashboard() {
       <h2>Dashboard</h2>
 
       {error && <p className="error-msg mt-1">{error}</p>}
+
+      {/* ── Monetization ─────────────────────────────────────────── */}
+      <div className="dashboard-money-section mt-2">
+        <h3>Monetization</h3>
+        {connectToast && (
+          <p className="donation-banner mt-1">{connectToast}</p>
+        )}
+        {!connect.loaded && (
+          <p style={{ color: 'var(--color-text-muted)' }}>Loading payout status…</p>
+        )}
+        {connect.loaded && connect.onboarded && (
+          <p className="connect-status-ok">● Payments enabled</p>
+        )}
+        {connect.loaded && !connect.onboarded && (
+          <>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
+              Connect a Stripe account to start accepting donations. Streamers get 85% of each
+              donation; the platform keeps 15% (test mode only).
+            </p>
+            <button
+              type="button"
+              className="btn"
+              disabled={connectBusy}
+              onClick={handleStartOnboarding}
+              style={{ marginTop: '0.5rem' }}
+            >
+              {connectBusy ? 'Redirecting…' : 'Connect Stripe Account'}
+            </button>
+          </>
+        )}
+        {connectError && <p className="error-msg mt-1">{connectError}</p>}
+      </div>
+
+      {/* ── Donation sounds ──────────────────────────────────────── */}
+      {connect.loaded && connect.onboarded && (
+        <div className="dashboard-money-section mt-2">
+          <h3>Donation Sounds</h3>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+            {sounds.length} / {SOUNDS_MAX} sounds used. 2 MB max per file.
+          </p>
+          {sounds.length === 0 && (
+            <p style={{ color: 'var(--color-text-muted)' }}>No sounds uploaded yet.</p>
+          )}
+          {sounds.length > 0 && (
+            <ul style={{ listStyle: 'none', padding: 0, marginTop: '0.5rem' }}>
+              {sounds.map((s) => (
+                <li
+                  key={s.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '0.4rem 0',
+                    borderBottom: '1px solid var(--color-border-subtle)',
+                  }}
+                >
+                  <span>{s.display_name}</span>
+                  <button
+                    type="button"
+                    className="btn btn--outline"
+                    onClick={() => handleDeleteSound(s.id)}
+                  >
+                    Delete
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form onSubmit={handleUploadSound} style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              placeholder="Display name"
+              value={soundDisplayName}
+              onChange={(e) => setSoundDisplayName(e.target.value)}
+              maxLength={50}
+              style={{ flex: 1, minWidth: '160px', padding: '0.5rem' }}
+            />
+            <input
+              type="file"
+              accept="audio/*"
+              ref={soundFileInputRef}
+              style={{ flex: 2, minWidth: '200px' }}
+            />
+            <button
+              type="submit"
+              className="btn"
+              disabled={uploadingSound || sounds.length >= SOUNDS_MAX || !activeStreamId}
+            >
+              {uploadingSound ? 'Uploading…' : 'Upload'}
+            </button>
+          </form>
+          {!activeStreamId && (
+            <p className="mt-1" style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+              Create a stream first so the donor sound picker has something to load.
+            </p>
+          )}
+          {soundError && <p className="error-msg mt-1">{soundError}</p>}
+        </div>
+      )}
+
+      {/* ── Donation history ─────────────────────────────────────── */}
+      {connect.loaded && connect.onboarded && (
+        <div className="dashboard-money-section mt-2">
+          <h3>Recent Donations</h3>
+          {donationHistory.length === 0 ? (
+            <p style={{ color: 'var(--color-text-muted)' }}>No donations yet.</p>
+          ) : (
+            <table style={{ width: '100%', marginTop: '0.5rem', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                  <th style={{ padding: '0.4rem 0' }}>When</th>
+                  <th>Donor</th>
+                  <th>Stream</th>
+                  <th style={{ textAlign: 'right' }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {donationHistory.map((d) => (
+                  <tr key={d.id} style={{ borderTop: '1px solid var(--color-border-subtle)' }}>
+                    <td style={{ padding: '0.4rem 0', fontSize: '0.85rem' }}>
+                      {new Date(d.created_at).toLocaleString()}
+                    </td>
+                    <td>{d.donor_name}</td>
+                    <td style={{ color: 'var(--color-text-muted)' }}>{d.stream_title}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                      ${(d.amount_cents / 100).toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       <div className="dashboard-section mt-2">
         <h3>Create a New Stream</h3>
