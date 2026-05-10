@@ -1,5 +1,6 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { getCertHash, getTransportUrl } from '../../services/api';
+import { getCertHash, getTransportUrl, getWhipPublishUrl } from '../../services/api';
+import { startWhipPublish } from '../../services/whip';
 
 // WebM/VP8 is preferred for canvas captureStream sources because
 // MediaRecorder emits one cluster per timeslice without needing
@@ -20,7 +21,21 @@ const WEBCAM_SCALE = 0.25;
 // Smaller timeslices = each MediaRecorder chunk is dispatched sooner, which
 // directly lowers glass-to-glass latency. 100ms keeps WebM clusters small.
 const STREAM_TIMESLICE_MS = 100;
-const WEBTRANSPORT_UNSUPPORTED_MESSAGE = 'Live streaming requires WebTransport. Safari does not support it yet, so use Chrome or Edge to go live.';
+const NO_TRANSPORT_MESSAGE = 'Live streaming requires WebTransport or WebRTC. Please use a recent version of Chrome, Edge, Firefox, or Safari.';
+
+/// Pick the publish transport the current browser can actually use.
+/// WebTransport is preferred (lower CPU on the server because we can
+/// `-c:v copy` H.264 straight to RTMP); WHIP (WebRTC) is the fallback
+/// for browsers that don't ship WebTransport (Firefox, Safari).
+function pickIngestTransport() {
+  if (typeof globalThis.WebTransport === 'function') {
+    return 'webtransport';
+  }
+  if (typeof globalThis.RTCPeerConnection === 'function') {
+    return 'whip';
+  }
+  return null;
+}
 
 /// Pick the lowest-latency MediaRecorder mime type the current browser
 /// actually supports.
@@ -34,7 +49,7 @@ function pickRecorderMimeType() {
   return null;
 }
 
-function ScreenCapture({ streamId }) {
+function ScreenCapture({ streamId, streamKey }) {
   const canvasRef = useRef(null);
   const screenVideoRef = useRef(null);
   const webcamVideoRef = useRef(null);
@@ -66,11 +81,17 @@ function ScreenCapture({ streamId }) {
   const transportRef = useRef(null);
   const streamWriterRef = useRef(null);
   const streamRecorderRef = useRef(null);
+  // WHIP publish session (Firefox/Safari fallback). Holds the `stop`
+  // function returned by `startWhipPublish`, which closes the peer
+  // connection AND issues the WHIP DELETE so SRS fires its
+  // `on_unpublish` hook immediately.
+  const whipSessionRef = useRef(null);
 
   const webcamOnRef = useRef(false);
   useEffect(() => { webcamOnRef.current = webcamOn; }, [webcamOn]);
 
-  const webTransportSupported = typeof globalThis.WebTransport === 'function';
+  const ingestTransport = pickIngestTransport();
+  const ingestSupported = ingestTransport !== null;
 
   const drawComposite = useCallback(() => {
     const canvas = canvasRef.current;
@@ -452,8 +473,8 @@ function ScreenCapture({ streamId }) {
     if (!compositeStreamRef.current || !streamId) return;
     setError(null);
 
-    if (!webTransportSupported) {
-      setError(WEBTRANSPORT_UNSUPPORTED_MESSAGE);
+    if (!ingestSupported) {
+      setError(NO_TRANSPORT_MESSAGE);
       setIsStreaming(false);
       return;
     }
@@ -473,6 +494,50 @@ function ScreenCapture({ streamId }) {
     if (transportRef.current) {
       try { transportRef.current.close(); } catch { /* ignore */ }
       transportRef.current = null;
+    }
+    if (whipSessionRef.current) {
+      try { whipSessionRef.current.stop(); } catch { /* ignore */ }
+      whipSessionRef.current = null;
+    }
+
+    // WHIP fallback (Firefox / Safari). Hand the composite media stream
+    // to SRS via standard WebRTC SRS bridges it into the same RTMP ->
+    // HLS pipeline that the WebTransport path feeds, so viewers see the
+    // exact same playback behaviour :)
+    if (ingestTransport === 'whip') {
+      const whipUrl = getWhipPublishUrl(streamKey);
+      if (!whipUrl) {
+        setError('Stream key is missing; cannot start WHIP publish.');
+        setIsStreaming(false);
+        return;
+      }
+
+      try {
+        const session = await startWhipPublish({
+          whipUrl,
+          mediaStream: compositeStreamRef.current,
+        });
+        whipSessionRef.current = session;
+        setIsStreaming(true);
+        console.log('[stream] WHIP publish established');
+
+        const pc = session.peerConnection;
+        const onStateChange = () => {
+          const state = pc.connectionState;
+          if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+            console.warn(`[stream] WHIP peer connection ${state}`);
+            whipSessionRef.current = null;
+            setIsStreaming(false);
+            pc.removeEventListener('connectionstatechange', onStateChange);
+          }
+        };
+        pc.addEventListener('connectionstatechange', onStateChange);
+      } catch (err) {
+        console.error('[stream] WHIP publish failed:', err);
+        setError(`WHIP publish failed: ${err.message || err}`);
+        setIsStreaming(false);
+      }
+      return;
     }
 
     try {
@@ -587,7 +652,7 @@ function ScreenCapture({ streamId }) {
       setError(`WebTransport connection failed: ${err.message}`);
       setIsStreaming(false);
     }
-  }, [streamId, sendChunkOverStream, webTransportSupported]);
+  }, [streamId, streamKey, sendChunkOverStream, ingestSupported, ingestTransport]);
 
   const stopStreaming = useCallback(() => {
     if (streamRecorderRef.current && streamRecorderRef.current.state !== 'inactive') {
@@ -601,6 +666,13 @@ function ScreenCapture({ streamId }) {
     if (transportRef.current) {
       transportRef.current.close();
       transportRef.current = null;
+    }
+    if (whipSessionRef.current) {
+      // `stop` is async (sends WHIP DELETE) but we don't need to await it
+      // here — SRS still fires `on_unpublish` when the peer connection
+      // tears down even if the DELETE is in flight.
+      whipSessionRef.current.stop().catch(() => {});
+      whipSessionRef.current = null;
     }
     setIsStreaming(false);
   }, []);
@@ -619,6 +691,10 @@ function ScreenCapture({ streamId }) {
       }
       if (streamWriterRef.current) streamWriterRef.current.close().catch(() => {});
       if (transportRef.current) transportRef.current.close();
+      if (whipSessionRef.current) {
+        whipSessionRef.current.stop().catch(() => {});
+        whipSessionRef.current = null;
+      }
       if (wsRef.current) wsRef.current.close();
     };
   }, []);
@@ -632,9 +708,14 @@ function ScreenCapture({ streamId }) {
       </p>
 
       {error && <p className="error-msg">{error}</p>}
-      {!webTransportSupported && (
+      {!ingestSupported && (
         <p style={{ fontSize: '0.85rem', color: 'var(--color-warning)', marginBottom: '0.75rem' }}>
-          {WEBTRANSPORT_UNSUPPORTED_MESSAGE}
+          {NO_TRANSPORT_MESSAGE}
+        </p>
+      )}
+      {ingestSupported && ingestTransport === 'whip' && (
+        <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>
+          Using WebRTC (WHIP) ingest for this browser.
         </p>
       )}
 
@@ -677,7 +758,7 @@ function ScreenCapture({ streamId }) {
             </button>
             {streamId && (              !isStreaming ? (
                 <button className="btn" type="button" onClick={startStreaming}
-                  disabled={!webTransportSupported}
+                  disabled={!ingestSupported}
                   style={{ background: '#e63946', color: '#fff', fontWeight: 700 }}>
                   ● Go Live
                 </button>

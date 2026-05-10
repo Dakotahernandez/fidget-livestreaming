@@ -79,6 +79,18 @@ export const getTransportUrl = (streamId) => {
   return `https://${host}:${quicPort}/ingest/${streamId}?token=${token}`;
 };
 
+// Same-origin WHIP (WebRTC-HTTP Ingestion Protocol) URL. Used by the
+// streamer fallback path in browsers without WebTransport (Firefox,
+// Safari). The frontend nginx proxies `/whip/` to SRS's
+// `/rtc/v1/whip/` endpoint, which accepts an SDP offer and bridges
+// the WebRTC publish into the existing RTMP -> HLS pipeline. The
+// `app=live` matches SRS's `live` vhost; `stream` is the per-stream
+// key the backend already issues for RTMP publish.
+export const getWhipPublishUrl = (streamKey) => {
+  if (!streamKey) return null;
+  return `/whip/?app=live&stream=${encodeURIComponent(streamKey)}`;
+};
+
 // ── Admin endpoints ─────────────────────────────────────────────────
 export const listUsers = () =>
   api.get('/admin/users');

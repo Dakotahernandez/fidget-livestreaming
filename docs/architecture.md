@@ -112,6 +112,77 @@ flowchart LR
 - Colors group nodes by tier: origin, ingest, control plane, edge, clients,
   and persistent storage.
 
+## Browser-Specific Ingest Pipelines
+
+Not every browser ships [WebTransport](https://www.w3.org/TR/webtransport/),
+so the streamer client picks an ingest transport at runtime. Chromium-based
+browsers (Chrome, Edge, Brave, Opera, Arc, Vivaldi) take the WebTransport
+path; Firefox and Safari fall back to **WHIP** (WebRTC-HTTP Ingestion
+Protocol, [RFC 9725](https://datatracker.ietf.org/doc/html/rfc9725)),
+which SRS terminates and bridges into the same RTMP → HLS pipeline. Viewers
+are unaffected — both forks converge on identical HLS output.
+
+```mermaid
+flowchart LR
+    subgraph CHROMIUM["Chromium browsers<br/>(Chrome, Edge, Brave, Opera, Arc, Vivaldi)"]
+        C1["MediaRecorder<br/>WebM / VP8"]
+    end
+
+    subgraph OTHERS["Firefox &amp; Safari"]
+        F1["RTCPeerConnection<br/>(sendonly transceivers)"]
+    end
+
+    subgraph INGEST_BE["Backend ingest"]
+        QUIC2["QUIC / WebTransport<br/>Rust + wtransport :4443/udp"]
+        FF2["ffmpeg<br/>WebM → H.264/AAC"]
+        WHIP["SRS WHIP endpoint<br/>/rtc/v1/whip/ :1985/tcp"]
+        RTMP2["RTMP origin"]
+        HLS2[("HLS segments")]
+    end
+
+    subgraph VIEW["All viewers"]
+        V1["HLS.js / native HLS"]
+    end
+
+    C1 == "WebTransport unidirectional stream<br/>(WebM clusters)" ==> QUIC2
+    QUIC2 ==> FF2
+    FF2 == "RTMP/FLV" ==> RTMP2
+
+    F1 == "SDP offer over HTTPS<br/>POST /whip/?app=live&amp;stream=<key>" ==> WHIP
+    WHIP == "WebRTC RTP<br/>(H.264 / Opus)" ==> RTMP2
+
+    RTMP2 == "package" ==> HLS2
+    HLS2 == "GET *.m3u8 / *.ts" ==> V1
+
+    classDef chromium fill:#bfdbfe,stroke:#1d4ed8,color:#1f2937;
+    classDef other    fill:#fde68a,stroke:#b45309,color:#1f2937;
+    classDef ingest   fill:#ddd6fe,stroke:#6d28d9,color:#1f2937;
+    classDef viewer   fill:#bbf7d0,stroke:#15803d,color:#1f2937;
+    classDef store    fill:#e5e7eb,stroke:#374151,color:#1f2937;
+
+    class C1 chromium;
+    class F1 other;
+    class QUIC2,FF2,WHIP,RTMP2 ingest;
+    class V1 viewer;
+    class HLS2 store;
+```
+
+**Transport selection logic** (in [`ScreenCapture.jsx`](../frontend/src/components/streamer/ScreenCapture.jsx)):
+
+| Capability check                            | Chosen ingest transport |
+|---------------------------------------------|-------------------------|
+| `globalThis.WebTransport` is a function     | WebTransport (preferred) |
+| Otherwise `RTCPeerConnection` is a function | WHIP / WebRTC fallback   |
+| Neither is available                        | UI disables Go Live      |
+
+**Same auth model** — the WHIP URL embeds the existing per-stream
+`stream_key` (`/whip/?app=live&stream=<key>`), the same secret SRS already
+trusts for the RTMP publish path. No JWT plumbing into SRS is required.
+
+**Same downstream path** — SRS bridges the WebRTC RTP into its internal
+RTMP origin, so the HLS packager, edge cache, and player code are unchanged
+regardless of which browser the streamer used.
+
 ## System Overview
 
 ```mermaid

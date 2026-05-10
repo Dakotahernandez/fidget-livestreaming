@@ -302,7 +302,7 @@ function Dashboard() {
             Start and stop your live broadcast from the Screen Capture controls below.
           </p>
 
-          <ScreenCapture streamId={stream.id} />
+          <ScreenCapture streamId={stream.id} streamKey={stream.stream_key} />
         </div>
       ))}
 
