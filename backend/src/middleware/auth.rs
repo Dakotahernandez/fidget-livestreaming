@@ -10,24 +10,24 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 
-/// JWT lifetime in seconds (24 hours).
+//JWT lifetime - 24 hours.
 const TOKEN_EXPIRY_SECS: i64 = 86_400;
 
 /// Claims encoded in every JWT.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub sub: Uuid,
-    pub exp: i64,
+    pub sub: Uuid,  //user id
+    pub exp: i64,   //unix-seconds expiry
 }
 
-/// Authenticated user id — extracted by the middleware and placed in
-/// request extensions so handlers can retrieve it.
+/// Authenticated user id. The middleware decodes the JWT and stuffs this into
+/// request extensions so route handlers can pull it back out.
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user_id: Uuid,
 }
 
-/// Create a signed JWT for the given user id.
+/// Build a signed JWT for the given user id.
 pub fn create_token(user_id: Uuid, secret: &str) -> Result<String, AppError> {
     let exp = chrono::Utc::now().timestamp() + TOKEN_EXPIRY_SECS;
     let claims = Claims { sub: user_id, exp };
@@ -40,18 +40,20 @@ pub fn create_token(user_id: Uuid, secret: &str) -> Result<String, AppError> {
     .map_err(|e| AppError::Internal(format!("token creation failed: {e}")))
 }
 
-/// Axum middleware: validates the `Authorization: Bearer <token>` header
-/// and injects `AuthUser` into request extensions.
+/// Middleware. Validates Authorization and injects an
+/// 'AuthUser' into request extensions. Returns 401 on any failure.
 pub async fn require_auth(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
+    //Pull the JWT secret out of the request's extensions (planted by main.rs).
     let secret = request
         .extensions()
         .get::<String>()
         .ok_or_else(|| AppError::Internal("JWT secret not configured".to_string()))?
         .clone();
 
+    //Parse "Authorization: Bearer <token>".
     let header_value = request
         .headers()
         .get(AUTHORIZATION)
@@ -62,6 +64,7 @@ pub async fn require_auth(
         .strip_prefix("Bearer ")
         .ok_or_else(|| AppError::Unauthorized("invalid authorization format".to_string()))?;
 
+    //Verify signature + expiry. Any decode failure ⇒ 401.
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
@@ -69,6 +72,7 @@ pub async fn require_auth(
     )
     .map_err(|_| AppError::Unauthorized("invalid or expired token".to_string()))?;
 
+    //Hand the user id to the downstream handler.
     let mut request = request;
     request
         .extensions_mut()

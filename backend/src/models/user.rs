@@ -5,33 +5,36 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 
-/// Stored user row.
+/// A row from the users table.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct User {
-    pub id: Uuid,
-    pub username: String,
-    pub email: String,
+    pub id: Uuid,                       //primary key
+    pub username: String,               //unique, used for login
+    pub email: String,                  //email address.
     #[serde(skip_serializing)]
-    pub password_hash: String,
-    pub role: String,
-    pub created_at: DateTime<Utc>,
+    pub password_hash: String,          //bcrypt hash. Never sent to the client.
+    pub role: String,                   //"viewer" | "streamer" | "admin"
+    pub created_at: DateTime<Utc>,      //signup time
 }
 
-/// Payload for the registration endpoint.
+/// Body for POST /api/auth/register.
 #[derive(Debug, Deserialize)]
 pub struct CreateUser {
     pub username: String,
     pub password: String,
 }
 
-/// Payload for the login endpoint.
+/// Body for POST /api/auth/login.
 #[derive(Debug, Deserialize)]
 pub struct LoginUser {
     pub username: String,
     pub password: String,
 }
 
-/// Insert a new user row. The email is derived from the username for now.
+/// Inserts a new user and returns the full row.
+/// Email is derived from the username for now. Unique-constraint violations
+/// surface as 400 BadRequest with "username already taken" so the client can
+/// show a friendly message instead of a generic DB error.
 pub async fn create_user(
     pool: &PgPool,
     username: &str,
@@ -73,7 +76,7 @@ pub async fn find_by_username(pool: &PgPool, username: &str) -> Result<Option<Us
     Ok(user)
 }
 
-/// Look up a user by their UUID.
+/// Look up a user by UUID.
 pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<User>, AppError> {
     let user = sqlx::query_as::<_, User>(
         "SELECT id, username, email, password_hash, role, created_at FROM users WHERE id = $1",
@@ -86,7 +89,7 @@ pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<User>, AppErro
 }
 
 
-/// Return all users.
+/// Return every user, newest first. Admin-only.
 pub async fn list_users(pool: &PgPool) -> Result<Vec<User>, AppError> {
     let users = sqlx::query_as::<_, User>(
         r#"
@@ -101,7 +104,7 @@ pub async fn list_users(pool: &PgPool) -> Result<Vec<User>, AppError> {
     Ok(users)
 }
 
-/// Update a user's role.
+/// Change a user's role. 404 if the id doesn't exist.
 pub async fn update_role(
     pool: &PgPool,
     id: Uuid,

@@ -5,16 +5,20 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 
+/// A chat message joined with its author's username.
 #[derive(Debug, Serialize, sqlx::FromRow, Clone)]
 pub struct ChatMessage {
-    pub id: Uuid,
-    pub stream_id: Uuid,
-    pub user_id: Uuid,
-    pub username: String,
-    pub message: String,
-    pub created_at: DateTime<Utc>,
+    pub id: Uuid,                   //primary key
+    pub stream_id: Uuid,            //which stream this message belongs to
+    pub user_id: Uuid,              //author
+    pub username: String,           //author's username
+    pub message: String,            //chat text (1...500 chars)
+    pub created_at: DateTime<Utc>,  //send time
 }
 
+/// Inserts a chat row and returns it joined with the author's username.
+/// Single round-trip via a CTE - cheaper than insert-then-select and means
+/// callers never see a half-saved message.
 pub async fn insert_message(
     pool: &PgPool,
     stream_id: Uuid,
@@ -48,6 +52,7 @@ pub async fn insert_message(
     Ok(saved)
 }
 
+///Returns the most recent messages in the given stream.
 pub async fn list_recent_messages(
     pool: &PgPool,
     stream_id: Uuid,
@@ -74,6 +79,7 @@ pub async fn list_recent_messages(
     .fetch_all(pool)
     .await?;
 
+    //Flip newest-first -> oldest-first for the caller.
     let mut messages = messages;
     messages.reverse();
 

@@ -5,29 +5,29 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 
-/// Stored stream row.
+/// A row from the streams table.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Stream {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub stream_key: String,
-    pub title: String,
-    pub is_public: bool,
+    pub id: Uuid,                                  //primary key
+    pub user_id: Uuid,                             //owner
+    pub stream_key: String,                        //RTMP ingest key. Secret.
+    pub title: String,                             //display title on cards
+    pub is_public: bool,                           //false = needs password to view
     #[serde(skip_serializing)]
-    pub access_password_hash: Option<String>,
-    pub is_live: bool,
-    pub started_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub access_password_hash: Option<String>,      //bcrypt hash. Never sent out.
+    pub is_live: bool,                             //flipped by SRS on_publish callbacks
+    pub started_at: Option<DateTime<Utc>>,         //last go-live timestamp
+    pub created_at: DateTime<Utc>,                 //row creation time
 }
 
-/// Payload for creating a new stream.
+/// Body for POST /api/streams.
 #[derive(Debug, Deserialize)]
 pub struct CreateStream {
     pub title: Option<String>,
     pub access_password: Option<String>,
 }
 
-/// Insert a new stream with a randomly generated key.
+/// Insert a new stream row with a randomly generated key.
 pub async fn create_stream(
     pool: &PgPool,
     user_id: Uuid,
@@ -55,7 +55,7 @@ pub async fn create_stream(
     Ok(stream)
 }
 
-/// Return all streams that are currently live.
+/// Return every stream currently live.
 pub async fn list_live_streams(pool: &PgPool) -> Result<Vec<Stream>, AppError> {
     let streams = sqlx::query_as::<_, Stream>(
         r#"
@@ -71,7 +71,7 @@ pub async fn list_live_streams(pool: &PgPool) -> Result<Vec<Stream>, AppError> {
     Ok(streams)
 }
 
-/// Return all streams owned by a user (live and offline).
+/// Return every stream owned by a user (including offline).
 pub async fn list_user_streams(pool: &PgPool, user_id: Uuid) -> Result<Vec<Stream>, AppError> {
     let streams = sqlx::query_as::<_, Stream>(
         r#"
@@ -88,7 +88,7 @@ pub async fn list_user_streams(pool: &PgPool, user_id: Uuid) -> Result<Vec<Strea
     Ok(streams)
 }
 
-/// Look up a stream by its unique key (used for RTMP auth).
+/// Look up a stream by its key.
 pub async fn find_by_stream_key(
     pool: &PgPool,
     stream_key: &str,
@@ -107,7 +107,7 @@ pub async fn find_by_stream_key(
     Ok(stream)
 }
 
-/// Look up a stream by id.
+/// Look up a stream by UUID.
 pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Stream>, AppError> {
     let stream = sqlx::query_as::<_, Stream>(
         r#"
@@ -123,7 +123,7 @@ pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Stream>, AppEr
     Ok(stream)
 }
 
-/// Mark a stream as live.
+/// Flip a stream to live and set started_at. 404 if not found.
 pub async fn set_live(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
     let stream = sqlx::query_as::<_, Stream>(
         r#"
@@ -141,7 +141,7 @@ pub async fn set_live(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
     Ok(stream)
 }
 
-/// Mark a stream offline by deleting the row. 
+/// Mark a stream offline by deleting its row. Returns rows affected.
 pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
     let result = sqlx::query(
         r#"
@@ -156,10 +156,7 @@ pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
     Ok(result.rows_affected())
 }
 
-/// Delete a stream by id, returning the number of affected rows. Streamers
-/// can prune old stream records from the dashboard with this; the row is
-/// gone for good (each new "Go Live" creates a fresh record via the create
-/// endpoint).
+/// Hard-delete a stream by id. Used by the dashboard prune button.
 pub async fn delete_stream(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
     let result = sqlx::query(
         r#"

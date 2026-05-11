@@ -15,10 +15,9 @@ use crate::middleware::auth::{require_auth, AuthUser};
 use crate::models::stream::{self, CreateStream};
 use crate::models:: user;
 
-/// Build the streams sub-router.
-///
-/// Public routes: list live streams, get stream details, and join a stream.
-/// Protected routes: create streams, list own streams, and force start/stop.
+/// Builds the /api/streams/* sub-router.
+/// Public: list live, get details, join. Protected: create, list-mine, start,
+/// stop, delete. Everything in `protected` runs through require_auth first.
 pub fn router() -> Router<(PgPool, Config)> {
     let public = Router::new()
         .route("/", get(list_streams))
@@ -36,20 +35,23 @@ pub fn router() -> Router<(PgPool, Config)> {
     public.merge(protected)
 }
 
+//Body for POST /:id/join - password is optional (public streams ignore it).
 #[derive(Debug, Deserialize)]
 struct JoinStreamRequest {
     password: Option<String>,
 }
 
+//Only admins and streamers can create streams.
 fn can_create_stream(role: &str) -> bool {
     role == "admin" || role == "streamer"
 }
 
+//Admins can control anyone's stream. Streamers can only control their own.
 fn can_control_stream(role: &str, owns_stream: bool) -> bool {
     role == "admin" || (role == "streamer" && owns_stream)
 }
 
-/// `GET /api/streams/me` — list all streams for the authenticated user.
+/// `GET /api/streams/me` - every stream the caller owns. Auth required.
 async fn list_my_streams(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,
@@ -76,7 +78,7 @@ async fn list_my_streams(
     Ok(Json(payload))
 }
 
-/// `GET /api/streams` — list all live streams.
+/// `GET /api/streams` - every current-live stream. Powers the home page.
 async fn list_streams(
     State((pool, _config)): State<(PgPool, Config)>,
 ) -> Result<Json<Vec<Value>>, AppError> {
@@ -100,7 +102,7 @@ async fn list_streams(
     Ok(Json(payload))
 }
 
-/// `GET /api/streams/:id` — get stream details for watch page metadata.
+/// `GET /api/streams/:id` - stream details for the watch page. Public.
 async fn get_stream(
     State((pool, _config)): State<(PgPool, Config)>,
     Path(id): Path<Uuid>,
@@ -121,7 +123,7 @@ async fn get_stream(
     })))
 }
 
-/// `POST /api/streams/:id/join` — validate stream access and return playable HLS URL.
+/// POST /api/streams/:id/join - verify access and return the HLS URL.
 async fn join_stream(
     State((pool, config)): State<(PgPool, Config)>,
     Path(id): Path<Uuid>,
@@ -131,6 +133,7 @@ async fn join_stream(
         .await?
         .ok_or_else(|| AppError::NotFound("stream not found".to_string()))?;
 
+    //Private stream: gate on the password hash.
     if !s.is_public {
         let submitted = body.password.unwrap_or_default();
         let hash = s
@@ -157,13 +160,14 @@ async fn join_stream(
     })))
 }
 
-/// `POST /api/streams` — create a new stream (auth required).
+/// `POST /api/streams` - create a stream. Auth required, streamer/admin only.
 async fn create(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,
     Json(body): Json<CreateStream>,
 ) -> Result<Json<Value>, AppError> {
 
+    //Role check - viewers can't create streams.
     let current_user = user::find_by_id(&pool, auth.user_id)
         .await?
         .ok_or_else(|| AppError::Unauthorized("user not found".to_string()))?;
@@ -175,6 +179,7 @@ async fn create(
     let title = body.title.as_deref().unwrap_or("Untitled Stream");
     let access_password = body.access_password.unwrap_or_default();
 
+    //Empty password -> public stream. Non-empty -> private with bcrypt hash.
     let password_hash = if access_password.trim().is_empty() {
         None
     } else {
@@ -204,7 +209,7 @@ async fn create(
     })))
 }
 
-/// `PUT /api/streams/:id/start` — mark stream as live (auth required).
+/// `PUT /api/streams/:id/start` - flip a stream live. Owner or admin only.
 async fn start(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,
@@ -236,10 +241,9 @@ async fn start(
     })))
 }
 
-/// `PUT /api/streams/:id/stop` — end a broadcast (auth required). The
-/// stream record is deleted entirely so it cannot be restarted and won't
-/// clutter the dashboard. To go live again the streamer creates a fresh
-/// stream from the dashboard form.
+/// `PUT /api/streams/:id/stop` - end a broadcast. Owner or admin only.
+/// Hard-deletes the row. To go live again, the streamer creates a fresh
+/// stream - each get a brand-new key.
 async fn stop(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,
@@ -271,9 +275,9 @@ async fn stop(
     })))
 }
 
-/// `DELETE /api/streams/:id` — remove an old stream record (auth required,
-/// owner or admin). Used by the dashboard to prune past streams so the UI isn't
-/// cluttered with non-active entries.
+/// `DELETE /api/streams/:id` - prune an old stream record. Owner or admin only.
+/// Same effect as /stop but exposed as a separate endpoint so the dashboard's
+/// "delete" button reads as deletion to the user, not stopping a broadcast.
 async fn delete_stream(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,

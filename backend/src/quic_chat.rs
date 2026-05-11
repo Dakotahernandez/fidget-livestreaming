@@ -8,16 +8,16 @@ use uuid::Uuid;
 
 use crate::models::chat;
 
-/// Max number of messages in the buffer 
+//Max number of buffered messages per stream channel.
 const CHAT_CHANNEL_CAPACITY: usize = 100;
 
-/// Max amount of bytes that can be read from the stream at once
+//Max bytes read from the WebTransport stream in one poll.
 const CHAT_READ_BUF: usize = 4096;
 
-/// Shared live chat state per channel
+/// Per-stream broadcast channels keyed by stream UUID.
 #[derive(Clone)]
 pub struct ChatState {
-    channels: Arc<Mutex<HashMap<Uuid, broadcast::Sender<chat::ChatMessage>>>>,
+    channels: Arc<Mutex<HashMap<Uuid, broadcast::Sender<chat::ChatMessage>>>>,  //stream_id → fan-out channel
 }
 
 impl ChatState {
@@ -40,20 +40,16 @@ impl ChatState {
     }
 }
 
-/// Maximum message length in characters
+//Hard cap on chat message length. DB enforces 1...500; we mirror it here.
 pub const MAX_CHAT_MESSAGE_CHARS: usize = 500;
 
-/// frontend to backend message
+//Wire format from the client: a single JSON object per line.
 #[derive(Debug, Deserialize)]
 pub struct IncomingChatMessage {
-    pub message: String,
+    pub message: String,  //the chat text the user typed
 }
 
-/// Persist a single incoming line, broadcast it to all subscribers.
-///
-/// Used by both the WebTransport and WebSocket chat handlers so the
-/// validation, persistence, and fan-out behaviour stays the same
-/// across methods
+/// Validate, persist, and fan-out one incoming chat line.
 pub async fn process_incoming_line(
     pool: &sqlx::PgPool,
     channel: &broadcast::Sender<chat::ChatMessage>,
@@ -106,7 +102,7 @@ pub async fn process_incoming_line(
     }
 }
 
-/// Parse `/chat/<uuid>?token=<jwt>` 
+/// Parse the WebTransport chat path into its parts.
 pub fn parse_chat_path(path: &str) -> Option<(Uuid, String)> {
     let (path_part, query) = path.split_once('?').unwrap_or((path, ""));
 
@@ -127,10 +123,7 @@ pub fn parse_chat_path(path: &str) -> Option<(Uuid, String)> {
     Some((stream_id, token))
 }
 
-/// Handle one WebTransport chat session.
-///
-/// frontend sends incoming messages through the stream
-/// backend broadcasts messages to everyone
+/// Drive one WebTransport chat session end-to-end.
 pub async fn handle_chat_session(
 	connection: wtransport::Connection,
 	pool: sqlx::PgPool,
@@ -159,7 +152,7 @@ pub async fn handle_chat_session(
 		}
 	};
 
-	// Writes messages to frontend.
+	//Server -> client: every saved message goes out as a newline-terminated JSON line.
 	let writer = tokio::spawn(async move {
 		let mut keep_writing = true;
 
@@ -181,7 +174,7 @@ pub async fn handle_chat_session(
 					}
 				}
 				Err(broadcast::error::RecvError::Lagged(_)) => {
-					// skip missed messages
+					//Lagged subscriber. Skip - viewer will refetch via REST.
 				}
 				Err(broadcast::error::RecvError::Closed) => {
 					keep_writing = false;
@@ -190,7 +183,7 @@ pub async fn handle_chat_session(
 		}
 	});
 
-	// frontend sends json delimited by '\n'
+	//Client -> server: read raw bytes and split on '\n'. Each line is one JSON message.
 	let mut buf = vec![0u8; CHAT_READ_BUF];
 	let mut pending = String::new();
 	let mut keep_reading = true;

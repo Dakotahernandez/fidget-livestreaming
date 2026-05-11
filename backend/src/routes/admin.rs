@@ -14,7 +14,7 @@ use crate::errors::AppError;
 use crate::middleware::auth::{require_auth, AuthUser};
 use crate::models::user;
 
-/// Build the admin sub-router.
+//Builds the /api/admin/* sub-router. Every route here requires a valid JWT.
 pub fn router() -> Router<(PgPool, Config)> {
     Router::new()
         .route("/users", get(list_users))
@@ -22,15 +22,18 @@ pub fn router() -> Router<(PgPool, Config)> {
         .layer(axum_mw::from_fn(require_auth))
 }
 
+//Body for PATCH /users/:id/role.
 #[derive(Debug, Deserialize)]
 struct UpdateRoleRequest {
     role: String,
 }
 
+//Allowed role values.
 fn is_valid_role(role: &str) -> bool {
     role == "admin" || role == "streamer" || role == "viewer"
 }
 
+/// Look up the caller and 403 if they aren't an admin.
 async fn require_admin(pool: &PgPool, auth: &AuthUser) -> Result<(), AppError> {
     let current_user = user::find_by_id(pool, auth.user_id)
         .await?
@@ -45,7 +48,7 @@ async fn require_admin(pool: &PgPool, auth: &AuthUser) -> Result<(), AppError> {
     Ok(())
 }
 
-/// `GET /api/admin/users` - list all users.
+/// `GET /api/admin/users` — return every user. Admin-only.
 async fn list_users(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,
@@ -70,7 +73,7 @@ async fn list_users(
     Ok(Json(payload))
 }
 
-/// `PATCH /api/admin/users/:id/role` - update a user's role.
+/// `PATCH /api/admin/users/:id/role` — change a user's role. Admin-only.
 async fn update_user_role(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(auth): Extension<AuthUser>,

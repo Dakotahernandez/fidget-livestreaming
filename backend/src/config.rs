@@ -1,15 +1,17 @@
 use std::env;
 
+/// Runtime configuration pulled from environment variables.
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub database_url: String,
-    pub jwt_secret: String,
-    pub rtmp_url: String,
-    pub quic_port: u16,
-    pub cloudfront_url: String
+    pub database_url: String,    //Postgres DSN.
+    pub jwt_secret: String,      //HS256 signing key for JWTs.
+    pub rtmp_url: String,        //RTMP base URL ffmpeg pushes to (SRS).
+    pub quic_port: u16,          //UDP port the WebTransport server binds.
+    pub cloudfront_url: String,  //CDN origin for HLS playback.
 }
 
 impl Config {
+    //Constructor that reads from env. Falls back to dev defaults where it can.
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = env::var("DATABASE_URL")
             .map_err(|_| ConfigError::Missing("DATABASE_URL"))?;
@@ -33,6 +35,7 @@ impl Config {
     }
 }
 
+//Error for missing required env vars.
 #[derive(Debug)]
 pub enum ConfigError {
     Missing(&'static str),

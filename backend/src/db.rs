@@ -1,17 +1,18 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-/// Maximum number of connections in the pool.
+//Max connections in our pool.
 const MAX_CONNECTIONS: u32 = 10;
 
-/// Create a connection pool from the given database URL.
+/// Builds the Postgres pool and runs idempotent schema patches so older dev
+/// databases don't need a manual migration step.
 pub async fn init_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let pool = PgPoolOptions::new()
         .max_connections(MAX_CONNECTIONS)
         .connect(database_url)
         .await?;
 
-    // Keep local developer databases forward-compatible when schema evolves.
+    //Add is_public column if the dev DB predates it.
     sqlx::query(
         r#"
         ALTER TABLE streams
@@ -21,6 +22,7 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    //Add a private-stream password hash column if the dev DB predates it.
     sqlx::query(
         r#"
         ALTER TABLE streams
@@ -30,7 +32,8 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-        sqlx::query(
+    //Create chat_messages if missing.
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS chat_messages (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -44,6 +47,6 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     )
     .execute(&pool)
     .await?;
-    
+
     Ok(pool)
 }
