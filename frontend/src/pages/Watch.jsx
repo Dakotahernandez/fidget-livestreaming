@@ -6,12 +6,16 @@ import StreamChat from '../components/chat/StreamChat';
 
 // Manual quality selection ladder. Values match the rendition suffixes
 // the backend's ffmpeg pushes to SRS (see backend/src/quic.rs RENDITIONS).
-// "source" means the stream's native resolution with no downscale.
+// All entries are downscaled renditions — there is no untouched-source
+// passthrough. The 1080p rendition uses
+// `force_original_aspect_ratio=decrease` server-side, so a sub-1080p
+// source still plays at its native size rather than being upscaled.
 const QUALITY_OPTIONS = [
-  { value: 'source', label: 'Source (best)' },
-  { value: '480p',   label: '480p' },
-  { value: '360p',   label: '360p' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p',  label: '720p' },
+  { value: '360p',  label: '360p' },
 ];
+const DEFAULT_QUALITY = '1080p';
 
 const EMPTY_PLAYBACK_METRICS = {
   source: '',
@@ -140,18 +144,20 @@ function Watch() {
   const [joinError, setJoinError] = useState('');
   const [joining, setJoining] = useState(false);
   const [playbackMetrics, setPlaybackMetrics] = useState(EMPTY_PLAYBACK_METRICS);
-  const [quality, setQuality] = useState('source');
+  const [quality, setQuality] = useState(DEFAULT_QUALITY);
 
   // Derived playback identifiers that fold the user's quality choice into
   // the URL/stream-key. The player effect keys on these so changing the
   // dropdown tears down the current WHEP/HLS player and starts a fresh
-  // one against the new rendition.
+  // one against the new rendition. Every rendition in the ladder is a
+  // suffixed publish (no untouched source passthrough), so the suffix is
+  // always appended when a stream key is present.
   const playbackKey = useMemo(
-    () => (quality === 'source' || !streamKey ? streamKey : `${streamKey}_${quality}`),
+    () => (streamKey ? `${streamKey}_${quality}` : streamKey),
     [streamKey, quality],
   );
   const playbackUrl = useMemo(() => {
-    if (!hlsUrl || !streamKey || quality === 'source') return hlsUrl;
+    if (!hlsUrl || !streamKey) return hlsUrl;
     // Both origin and edge-routed URLs end in `…/hls/<streamKey>/index.m3u8`,
     // so it's safe to swap just the key segment without re-running the
     // route lookup.

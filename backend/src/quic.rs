@@ -408,17 +408,22 @@ fn detect_input_format(data: &[u8]) -> Option<(InputFormat, usize)> {
 }
 
 /// Suffixes appended to the base stream key for the manual quality
-/// selection ladder. The empty string is the source rendition (no
-/// downscale); the others are downscaled variants.
+/// selection ladder. Each entry is an independent RTMP publish to SRS,
+/// which generates a matching HLS playlist + WHEP endpoint per rendition.
 ///
 /// Viewers swap renditions by appending the suffix to the playback URL,
-/// e.g. `…/hls/live_<uuid>_480p/index.m3u8`. SRS sees each rendition as
-/// an independent publish, generates an independent HLS playlist for it,
-/// and bridges it to its own WHEP endpoint.
+/// e.g. `…/hls/live_<uuid>_720p/index.m3u8`.
+///
+/// Resolutions are an upper-bound box: the scale filter uses
+/// `force_original_aspect_ratio=decrease`, so a smaller-than-target
+/// source (e.g. a 1366×768 laptop streaming the "1080p" rendition)
+/// passes through at its native size rather than upscaling. Bitrates
+/// are tuned for ~30 fps screen-capture content with libx264 `veryfast`;
+/// bump them ~50% for 60 fps gameplay.
 const RENDITIONS: &[Rendition] = &[
-    Rendition { suffix: "", width: 0, height: 0, video_kbps: 0, audio_kbps: 128 }, // source
-    Rendition { suffix: "_480p", width: 854, height: 480, video_kbps: 1000, audio_kbps: 96 },
-    Rendition { suffix: "_360p", width: 640, height: 360, video_kbps: 600,  audio_kbps: 64 },
+    Rendition { suffix: "_1080p", width: 1920, height: 1080, video_kbps: 4000, audio_kbps: 128 },
+    Rendition { suffix: "_720p",  width: 1280, height: 720,  video_kbps: 2000, audio_kbps: 96  },
+    Rendition { suffix: "_360p",  width: 640,  height: 360,  video_kbps: 600,  audio_kbps: 64  },
 ];
 
 #[derive(Debug, Clone, Copy)]
