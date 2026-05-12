@@ -45,10 +45,10 @@ jobs:
         run: npm run build
 
   cd:
-    name: CD Smoke Check (Compose Build)
+    name: CD (Deploy to Server)
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,5 +56,14 @@ jobs:
       - name: Prepare environment file
         run: cp .env.example .env
 
-      - name: Build deployable services
+      - name: Cleanup old images
+        run: docker system prune -a -f --filter "until=24h"
+
+      - name: Build services
         run: docker compose -f docker-compose.yml build
+
+      - name: Deploy
+        if: success()
+        run: |
+          docker compose -f docker-compose.yml down
+          docker compose -f docker-compose.yml up -d
