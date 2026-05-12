@@ -27,8 +27,17 @@ const NO_TRANSPORT_MESSAGE = 'Live streaming requires WebTransport or WebRTC. Pl
 /// WebTransport is preferred (lower CPU on the server because we can
 /// `-c:v copy` H.264 straight to RTMP); WHIP (WebRTC) is the fallback
 /// for browsers that don't ship WebTransport (Firefox, Safari).
+///
+/// `VITE_DISABLE_WEBTRANSPORT=1` (build-time) forces the WHIP path even on
+/// browsers that ship WebTransport. Used in deployments where the SPA is
+/// served behind a CDN that cannot carry UDP (e.g. CloudFront), so the
+/// only reachable ingest is WHIP over TCP/443.
 function pickIngestTransport() {
-  if (typeof globalThis.WebTransport === 'function') {
+  const disableWt =
+    String(import.meta.env.VITE_DISABLE_WEBTRANSPORT || '').toLowerCase() === '1' ||
+    String(import.meta.env.VITE_DISABLE_WEBTRANSPORT || '').toLowerCase() === 'true';
+
+  if (!disableWt && typeof globalThis.WebTransport === 'function') {
     return 'webtransport';
   }
   if (typeof globalThis.RTCPeerConnection === 'function') {

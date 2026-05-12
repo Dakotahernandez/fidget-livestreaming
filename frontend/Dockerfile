@@ -16,6 +16,13 @@ COPY vite.config.js .
 ARG VITE_WEBTRANSPORT_HOST=""
 ENV VITE_WEBTRANSPORT_HOST=$VITE_WEBTRANSPORT_HOST
 
+# Force the streamer to use the WHIP (WebRTC over TCP/443) path even on
+# browsers that ship WebTransport. Set to "1" when the deployment cannot
+# expose UDP/4443 (e.g. SPA served behind CloudFront with no separate
+# ingest hostname). Leave empty/unset to allow WebTransport when supported.
+ARG VITE_DISABLE_WEBTRANSPORT=""
+ENV VITE_DISABLE_WEBTRANSPORT=$VITE_DISABLE_WEBTRANSPORT
+
 RUN npm run build
 
 FROM nginx:alpine

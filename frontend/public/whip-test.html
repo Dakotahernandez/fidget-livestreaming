@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>WHIP Test Harness</title></head>
+<body>
+<h1>WHIP Test Harness</h1>
+<p>Canvas + oscillator -> WHIP publish (no getUserMedia required).</p>
+<label>Stream key: <input id="key" size="50"></label>
+<button id="go">Publish</button>
+<button id="stop" disabled>Stop</button>
+<pre id="log" style="background:#111;color:#0f0;padding:8px;height:300px;overflow:auto;"></pre>
+<canvas id="cv" width="640" height="360" style="border:1px solid #888"></canvas>
+<script>
+const log = (...a) => { const el=document.getElementById('log'); el.textContent += a.join(' ') + '\n'; el.scrollTop = el.scrollHeight; console.log(...a); };
+let session = null;
+
+document.getElementById('go').onclick = async () => {
+  const key = document.getElementById('key').value.trim();
+  if (!key) { log('Need stream key'); return; }
+  try {
+    log('Building canvas + audio composite stream...');
+    const cv = document.getElementById('cv');
+    const ctx = cv.getContext('2d');
+    let t = 0;
+    setInterval(() => {
+      t += 0.05;
+      ctx.fillStyle = `hsl(${(t*30)%360},70%,40%)`;
+      ctx.fillRect(0,0,640,360);
+      ctx.fillStyle = '#fff';
+      ctx.font = '32px monospace';
+      ctx.fillText('WHIP TEST t=' + t.toFixed(1), 30, 180);
+    }, 33);
+    const vstream = cv.captureStream(30);
+
+    const ac = new AudioContext();
+    const osc = ac.createOscillator();
+    osc.frequency.value = 440;
+    const dest = ac.createMediaStreamDestination();
+    osc.connect(dest);
+    osc.start();
+
+    const composite = new MediaStream([
+      ...vstream.getVideoTracks(),
+      ...dest.stream.getAudioTracks(),
+    ]);
+    log('Composite tracks:', composite.getTracks().map(t => t.kind).join(','));
+
+    const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+    for (const tr of composite.getTracks()) {
+      pc.addTransceiver(tr, { direction: 'sendonly', streams: [composite] });
+    }
+    pc.oniceconnectionstatechange = () => log('iceConnectionState:', pc.iceConnectionState);
+    pc.onconnectionstatechange = () => log('connectionState:', pc.connectionState);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // wait ICE gather
+    await new Promise(res => {
+      if (pc.iceGatheringState === 'complete') return res();
+      const to = setTimeout(res, 3000);
+      pc.addEventListener('icegatheringstatechange', () => {
+        if (pc.iceGatheringState === 'complete') { clearTimeout(to); res(); }
+      });
+    });
+
+    const url = `/whip/?app=live&stream=${encodeURIComponent(key)}`;
+    log('POST', url);
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: pc.localDescription.sdp,
+    });
+    log('WHIP status:', resp.status);
+    if (!resp.ok) {
+      const body = await resp.text();
+      log('WHIP body:', body.slice(0, 500));
+      throw new Error('WHIP failed ' + resp.status);
+    }
+    const answer = await resp.text();
+    log('Answer SDP length:', answer.length);
+    await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+    log('Remote answer applied. Waiting for ICE...');
+    session = { pc, location: resp.headers.get('Location') };
+    document.getElementById('stop').disabled = false;
+  } catch (e) {
+    log('ERROR:', e.message);
+    console.error(e);
+  }
+};
+
+document.getElementById('stop').onclick = async () => {
+  if (!session) return;
+  try { session.pc.close(); } catch {}
+  if (session.location) {
+    try {
+      const u = new URL(session.location, window.location.origin);
+      await fetch(u, { method: 'DELETE' });
+      log('DELETE sent');
+    } catch (e) { log('DELETE failed:', e.message); }
+  }
+  session = null;
+  document.getElementById('stop').disabled = true;
+};
+</script>
+</body>
+</html>

@@ -42,7 +42,13 @@ services:
       - fidget-net
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Force the streamer onto the WHIP path. Required for deployments
+        # behind CloudFront (which can't proxy UDP/4443) and useful for
+        # local end-to-end testing of the WHIP+rendition-ladder pipeline.
+        VITE_DISABLE_WEBTRANSPORT: "1"
     ports:
       - "3000:3000"
     depends_on:
