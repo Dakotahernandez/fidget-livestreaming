@@ -10,7 +10,6 @@ mod quic_chat;
 use axum::{routing::get, Extension, Json, Router};
 use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::Config;
@@ -35,6 +34,10 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
+    db::ensure_admin_user(&pool, &cfg.admin_username, &cfg.admin_password)
+        .await
+        .expect("failed to ensure admin user from environment");
+
     tracing::info!("Database connected");
 
     //Shared in-memory chat state. Holds per-stream broadcast channels.
@@ -49,7 +52,6 @@ async fn main() {
         pool.clone(),
         chat_state.clone(),
     );
-    let cert_hash = Arc::new(cert_hash);
 
     //Open CORS - fine because every state-changing route requires a JWT.
     let cors = CorsLayer::new()
@@ -65,6 +67,7 @@ async fn main() {
         .nest("/api/auth", routes::auth::router())
         .nest("/api/admin", routes::admin::router())
         .nest("/api/chat", routes::chat::router())
+        .nest("/api/role-applications", routes::role_applications::router())
         .nest("/api/streams", routes::streams::router())
         .nest("/api/internal/rtmp", routes::internal::router())
         .nest("/api/config", routes::config::router())

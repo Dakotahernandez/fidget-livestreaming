@@ -8,6 +8,8 @@ pub struct Config {
     pub rtmp_url: String,        //RTMP base URL ffmpeg pushes to (SRS).
     pub quic_port: u16,          //UDP port the WebTransport server binds.
     pub cloudfront_url: String,  //CDN origin for HLS playback.
+    pub admin_username: String,
+    pub admin_password: String,
 }
 
 impl Config {
@@ -23,14 +25,25 @@ impl Config {
             .unwrap_or_else(|_| "4443".to_string())
             .parse()
             .unwrap_or(4443);
-        let cloudfront_url = env::var("CLOUDFRONT_DOMAIN")
-            .unwrap_or_else(|_| "https://d1wp4v4rt1bxg5.cloudfront.net".to_string());
+        // Optional external HLS base URL (CloudFront in production).
+        // When unset, callers fall back to a relative `/hls/<key>/index.m3u8`
+        // path which the frontend nginx proxies to the in-cluster
+        // media-server. This keeps local docker-compose dev working
+        // without any deployment-specific env overrides.
+        let cloudfront_url = env::var("CLOUDFRONT_DOMAIN").unwrap_or_default();
+        let admin_username = env::var("ADMIN_USERNAME")
+            .map_err(|_| ConfigError::Missing("ADMIN_USERNAME"))?;
+        let admin_password = env::var("ADMIN_PASSWORD")
+            .map_err(|_| ConfigError::Missing("ADMIN_PASSWORD"))?;
+
         Ok(Self {
             database_url,
             jwt_secret,
             rtmp_url,
             quic_port,
             cloudfront_url,
+            admin_username,
+            admin_password,
         })
     }
 }
