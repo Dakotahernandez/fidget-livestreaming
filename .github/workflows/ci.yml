@@ -56,11 +56,26 @@ jobs:
       - name: Prepare environment file
         run: cp .env.example .env
 
-      - name: Cleanup old images
-        run: docker system prune -a -f --filter "until=24h"
+      - name: Cleanup dangling images only
+        # Avoid `docker system prune -a` here: it deletes the warm
+        # backend builder cache layer and forces cargo to rebuild ~400
+        # crates from scratch on every push, which has been OOM-killing
+        # the self-hosted runner mid-compile ("runner lost communication
+        # with the server"). Reap only dangling images / build cache
+        # older than 7 days instead.
+        run: |
+          docker image prune -f
+          docker builder prune -f --filter "until=168h" || true
 
       - name: Build services
-        run: docker compose -f docker-compose.yml build
+        env:
+          # Cap cargo parallelism on the self-hosted runner so the Rust
+          # backend build (~400 crates, peaks ~5 GB RAM at -j$(nproc))
+          # doesn't starve the runner agent of memory.
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml build \
+            --build-arg CARGO_BUILD_JOBS=2
 
       - name: Deploy
         if: success()

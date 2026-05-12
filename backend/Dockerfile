@@ -10,8 +10,14 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 
+# Cap cargo's encoder/codegen parallelism on memory-constrained CI
+# runners (defaults to one job per CPU, which OOMs the self-hosted
+# runner). Override at build time with --build-arg CARGO_BUILD_JOBS=N.
+ARG CARGO_BUILD_JOBS=""
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
 ENV SQLX_OFFLINE=true
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 
