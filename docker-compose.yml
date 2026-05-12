@@ -26,6 +26,12 @@ services:
   backend:
     build: ./backend
     env_file: .env
+    environment:
+      # Override RTMP_URL so ffmpeg inside the backend container reaches the
+      # media-server via the Docker-internal service name rather than an
+      # external domain (which may not be routable from inside the bridge
+      # network and would silently drop the ingest, producing no HLS segments).
+      RTMP_URL: rtmp://media-server:1935/live
     depends_on:
       db:
         condition: service_healthy

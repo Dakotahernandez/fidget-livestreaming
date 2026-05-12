@@ -68,12 +68,16 @@ async function startWhepPlayback({ streamKey, video, signal }) {
   pc.addTransceiver('audio', { direction: 'recvonly' });
 
   // Wire received tracks to the <video> element as they arrive.
+  // Use event.track directly rather than event.streams[0]?.getTracks() —
+  // SRS may send tracks ungrouped (empty streams array), which would
+  // silently add nothing and leave the video element with no video track
+  // (audio plays but video stays black).
   const remoteStream = new MediaStream();
   video.srcObject = remoteStream;
   video.autoplay = true;
   video.playsInline = true;
   pc.ontrack = (event) => {
-    event.streams[0]?.getTracks().forEach((t) => remoteStream.addTrack(t));
+    remoteStream.addTrack(event.track);
   };
 
   const cleanup = () => {
@@ -105,22 +109,42 @@ async function startWhepPlayback({ streamKey, video, signal }) {
   const answerSdp = await response.text();
   await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
-  // Resolve once the video element actually paints a frame; reject if it
-  // doesn't happen quickly enough so HLS can take over.
+  // Resolve only when an actual video frame has rendered — not just on
+  // the `playing` event, which fires as soon as any media (audio
+  // included) starts rendering. If the audio decodes but the video
+  // doesn't (codec/profile mismatch, decoder rejection), the old logic
+  // resolved successfully on the audio-only `playing` event and HLS
+  // fallback never ran — the user saw audio with a black video element.
+  // Prefer requestVideoFrameCallback for an authoritative signal, and
+  // fall back to polling `videoWidth` when the API isn't available.
   await new Promise((resolve, reject) => {
+    let settled = false;
     let timer = null;
-    const onPlaying = () => {
+    let pollTimer = null;
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
-      video.removeEventListener('playing', onPlaying);
-      resolve();
+      if (pollTimer) clearInterval(pollTimer);
+      if (err) reject(err); else resolve();
     };
-    timer = setTimeout(() => {
-      video.removeEventListener('playing', onPlaying);
-      reject(new Error('WHEP first-frame timeout'));
-    }, WHEP_FIRST_FRAME_TIMEOUT_MS);
-    video.addEventListener('playing', onPlaying);
+
+    timer = setTimeout(
+      () => finish(new Error('WHEP first-video-frame timeout')),
+      WHEP_FIRST_FRAME_TIMEOUT_MS,
+    );
+
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      video.requestVideoFrameCallback(() => finish());
+    } else {
+      pollTimer = setInterval(() => {
+        if (video.videoWidth > 0 && video.readyState >= 2) finish();
+      }, 100);
+    }
+
     // Some browsers need an explicit play() after srcObject changes.
-    video.play().catch(() => { /* ignore — onPlaying still fires when ready */ });
+    video.play().catch(() => { /* ignore — frame callback still fires */ });
   });
 
   return cleanup;

@@ -99,9 +99,15 @@ fn load_edges_from_env() -> Vec<EdgeServer> {
         }
     }
 
+    // Local-dev fallback: empty URL means the route handler returns a
+    // *relative* `/hls/<key>/index.m3u8` path, which the viewer's browser
+    // resolves against its current origin (the frontend container at
+    // :3000). The frontend nginx then proxies `/hls/` to the
+    // media-server. This avoids handing the browser a Docker-internal
+    // hostname like `http://edge:8090/...` that it cannot resolve.
     vec![EdgeServer {
         id: "edge-local".to_string(),
-        url: "http://edge:8090".to_string(),
+        url: String::new(),
         location: Location {
             latitude: 0.0,
             longitude: 0.0,

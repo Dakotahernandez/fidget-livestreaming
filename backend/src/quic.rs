@@ -473,18 +473,24 @@ fn detect_input_format(data: &[u8]) -> Option<(InputFormat, usize)> {
 //through at its native size rather than upscaling. Bitrates are tuned
 //for ~30 fps screen-capture with libx264 veryfast.
 const RENDITIONS: &[Rendition] = &[
-    Rendition { suffix: "_1080p", width: 1920, height: 1080, video_kbps: 4000, audio_kbps: 128 },
-    Rendition { suffix: "_720p",  width: 1280, height: 720,  video_kbps: 2000, audio_kbps: 96  },
-    Rendition { suffix: "_360p",  width: 640,  height: 360,  video_kbps: 600,  audio_kbps: 64  },
+    //passthrough: true — for H.264/MP4 input this rendition uses -c:v copy,
+    //preserving the original quality. WebM still re-encodes.
+    Rendition { suffix: "_1080p", width: 1920, height: 1080, video_kbps: 4000, audio_kbps: 128, passthrough: true  },
+    Rendition { suffix: "_720p",  width: 1280, height: 720,  video_kbps: 2000, audio_kbps: 96,  passthrough: false },
+    Rendition { suffix: "_360p",  width: 640,  height: 360,  video_kbps: 600,  audio_kbps: 64,  passthrough: false },
 ];
 
 #[derive(Debug, Clone, Copy)]
 struct Rendition {
-    suffix: &'static str,  //stream-key suffix. Empty = source.
-    width: u32,            //target width. 0 = keep source.
-    height: u32,           //target height. 0 = keep source.
-    video_kbps: u32,       //video bitrate in kbps. 0 = let libx264 pick.
+    suffix: &'static str,  //stream-key suffix.
+    width: u32,            //target width.
+    height: u32,           //target height.
+    video_kbps: u32,       //video bitrate in kbps.
     audio_kbps: u32,       //audio bitrate in kbps.
+    //When true and the source is H.264/MP4, this rendition skips the
+    //libx264 filter graph and uses -c:v copy to preserve the original
+    //bitstream quality. WebM input (VP8) always re-encodes regardless.
+    passthrough: bool,
 }
 
 /// Spawn ffmpeg to demux the input pipe and fanout to every rendition.
@@ -518,16 +524,13 @@ fn spawn_ffmpeg(
     }
 
     //Which renditions join the libx264 filter graph?
-    //WebM source must re-encode (VP8 → H.264) -> joins.
-    //All downscales always join.
-    let source_through_filter = matches!(format, InputFormat::WebM);
+    //WebM (VP8) must re-encode everything. For MP4 (H.264), passthrough
+    //renditions bypass the filter and map directly from the input stream.
     let mut filter_renditions: Vec<&Rendition> = Vec::new();
-    if source_through_filter {
-        if let Some(src) = RENDITIONS.iter().find(|r| r.suffix.is_empty()) {
-            filter_renditions.push(src);
+    for r in RENDITIONS.iter() {
+        if r.passthrough && matches!(format, InputFormat::Mp4) {
+            continue;
         }
-    }
-    for r in RENDITIONS.iter().filter(|r| !r.suffix.is_empty()) {
         filter_renditions.push(r);
     }
 
@@ -575,8 +578,6 @@ fn spawn_ffmpeg(
     }
 
     for r in RENDITIONS {
-        let is_source = r.suffix.is_empty();
-
         let through_filter = filter_renditions.iter().any(|fr| fr.suffix == r.suffix);
         let map_label = if through_filter {
             format!("[{}]", pad_label(r.suffix))
@@ -587,7 +588,7 @@ fn spawn_ffmpeg(
 
         let needs_libx264 = match format {
             InputFormat::WebM => true,
-            InputFormat::Mp4 => !is_source,
+            InputFormat::Mp4 => !r.passthrough,
         };
         if needs_libx264 {
             cmd.args([
@@ -595,6 +596,15 @@ fn spawn_ffmpeg(
                 "-pix_fmt", "yuv420p",
                 "-preset", "veryfast",
                 "-tune", "zerolatency",
+                // Constrained Baseline is the most broadly supported H.264
+                // profile over WebRTC/WHEP. SRS repackages NAL units rather
+                // than transcoding for the RTC bridge, so the encoded
+                // profile here is what the browser ultimately receives.
+                // Without this, libx264 defaults to High, which some
+                // browsers refuse to decode over WebRTC — symptom is audio
+                // playing while the video element stays black.
+                "-profile:v", "baseline",
+                "-level", "3.1",
                 "-g", "30",
                 "-keyint_min", "30",
                 "-sc_threshold", "0",
@@ -614,7 +624,7 @@ fn spawn_ffmpeg(
             cmd.args(["-c:v", "copy"]);
         }
 
-        if !is_source || matches!(format, InputFormat::WebM) {
+        if !r.passthrough || matches!(format, InputFormat::WebM) {
             let b = format!("{}k", r.audio_kbps);
             cmd.args([
                 "-c:a", "aac",
@@ -624,14 +634,12 @@ fn spawn_ffmpeg(
                 "-b:a", b.as_str(),
             ]);
         } else {
+            //H.264/MP4 passthrough: copy the AAC track and strip ADTS framing
+            //so RTMP gets the raw ADIF payload it expects.
             cmd.args(["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]);
         }
 
-        let out_url = if is_source {
-            destination.to_string()
-        } else {
-            format!("{destination}{}", r.suffix)
-        };
+        let out_url = format!("{destination}{}", r.suffix);
         cmd.args(["-f", "flv", "-flvflags", "no_duration_filesize"]);
         cmd.arg(out_url.as_str());
     }
