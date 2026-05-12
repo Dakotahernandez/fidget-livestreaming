@@ -74,6 +74,41 @@ The core of your project should, ideally, be written in Rust. Depending on the p
 
 ## Questions
 - What is your project?
+
+Fidget is a one-to-many live streaming platform with CDN-style delivery. Browsers ingest video over WebTransport (QUIC) or WHIP (WebRTC), the Rust/Axum backend transcodes into an HLS rendition ladder, and a GeoIP-aware router steers viewers to the nearest edge (local nginx or CloudFront) for low-latency playback.
+
+### Dakota
+
+**What novel work did you do?**
+Scaffolded the project and built most of the streaming pipeline: a Rust QUIC/WebTransport ingest server with JWT auth and ffmpeg fan-out, a WHIP fallback for Firefox/Safari, and a WHEP viewer with HLS fallback that cut local latency from ~2.7 s to near-instant. Migrated the media server from nginx-rtmp to SRS for LL-HLS, wrote the WHIP->RTMP rendition ladder bridge.Finally the role-application/admin flow.
+
+**What did you learn?**
+A lot about the realities of live video on the web NSthe level of fine tuned it is to work so flawlessly on services i use everyd day, WebTransport vs. WHIP/WHEP tradeoffs, how libx264 cares about even dimensions (the 761×877 canvas bug), how to keep ffmpeg from stalling by draining stderr. I also learned how much infrastructure work sits between "it works on localhost" and "it works deployed on EC2."
+
+**What was challenging?**
+Crossbrowser ingest was the hardest part — WebTransport only really works on Chromium, so I had to design the system to gracefully fall back to WHIP and still feed the same HLS ladder. Latency tuning was also painful: chasing down a ~2.7 s delay led me through MediaRecorder timeslice tweaks, skipping libx264 when the browser already sends H.264, swapping to SRS for LL-HLS, and finally moving the viewer to WHEP.
+
+**What AI tools did you use, and what did you use them for? What were their benefits and drawbacks?**
+I used GitHub Copilot (Claude/GPT models in the chat side panel) heavily for Dockerfiles, nginx configs, and explaining unfamiliar APIs . The benefit was speed: it saved hours on config syntax and let me prototype the QUIC ingest much faster. The drawback was that it confidently produced wrong code for anything  i was unfamiliar with so I had to read docs anywaysto actually get things working.
+
+**What would you do differently next time?**
+Pick a tried and tested architecture that's known to scale before starting, instead of swapping core pieces (nginx-rtmp -> SRS) mid-project. I'd also set up AWS so everyone on the team can touch the servers and services from day one rather than having it bottlenecked through one person, shared access, shared deploy scripts, and the EC2/CloudFront environment.
+
+### Josh
+- What novel work did you do?
+- What did you learn?
+- What was challenging?
+- What AI tools did you use, and what did you use them for? What were their benefits and drawbacks?
+- What would you do differently next time?
+
+### Chandler
+- What novel work did you do?
+- What did you learn?
+- What was challenging?
+- What AI tools did you use, and what did you use them for? What were their benefits and drawbacks?
+- What would you do differently next time?
+
+### Ben
 - What novel work did you do?
 - What did you learn?
 - What was challenging?
