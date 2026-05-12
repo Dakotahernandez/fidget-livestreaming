@@ -141,11 +141,16 @@ pub async fn set_live(pool: &PgPool, id: Uuid) -> Result<Stream, AppError> {
     Ok(stream)
 }
 
-/// Mark a stream offline by deleting its row. Returns rows affected.
+/// Mark a stream offline. Flips `is_live` to false and clears
+/// `started_at`. Does NOT delete the row — the stream key, title, and
+/// password (if any) survive so the streamer can stop and re-publish
+/// without losing the stream identity. Use [`delete_stream`] for an
+/// explicit hard delete.
 pub async fn set_offline(pool: &PgPool, id: Uuid) -> Result<u64, AppError> {
     let result = sqlx::query(
         r#"
-        DELETE FROM streams
+        UPDATE streams
+        SET is_live = false, started_at = NULL
         WHERE id = $1
         "#,
     )

@@ -83,6 +83,11 @@ For local dev the EC2/S3/CloudFront layer is bypassed — the edge nginx contain
 
 ```bash
 cp .env.example .env
+# Docker Desktop on macOS / Windows: set CANDIDATE to your host LAN IP
+# (e.g. `ipconfig getifaddr en0` on macOS) so SRS hands a reachable
+# WebRTC candidate to browsers. Without this, WHIP DTLS hangs and
+# viewers never see video. Linux hosts can keep the 127.0.0.1 default.
+#   echo "CANDIDATE=$(ipconfig getifaddr en0)" >> .env   # macOS
 docker-compose up --build
 ```
 

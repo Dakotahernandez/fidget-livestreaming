@@ -80,6 +80,15 @@ export async function startWhipPublish({ whipUrl, mediaStream }) {
     });
 
     if (!response.ok) {
+      // SRS surfaces RtcStreamBusy as 5xx when a previous publisher
+      // session for the same stream key is still alive (typically a
+      // stale ICE/DTLS session left over from a tab reload). Give the
+      // user an actionable hint instead of a bare HTTP code.
+      if (response.status === 502 || response.status === 503) {
+        throw new Error(
+          `WHIP signalling failed: ${response.status} (stream is busy — wait ~30s for the previous session to time out, then click Go Live again)`
+        );
+      }
       throw new Error(`WHIP signalling failed: ${response.status}`);
     }
 
