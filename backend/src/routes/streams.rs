@@ -23,7 +23,11 @@ pub fn router() -> Router<(PgPool, Config)> {
     let public = Router::new()
         .route("/", get(list_streams))
         .route("/:id", get(get_stream))
-        .route("/:id/join", post(join_stream));
+        .route("/:id/join", post(join_stream))
+
+        //nginx
+        .route("/on_publish", post(on_publish))
+        .route("/on_done", post(on_done));
 
     let protected = Router::new()
         .route("/", post(create))
@@ -39,6 +43,11 @@ pub fn router() -> Router<(PgPool, Config)> {
 #[derive(Debug, Deserialize)]
 struct JoinStreamRequest {
     password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NginxCallback {
+    name: String, //Stream key from OBS
 }
 
 fn can_create_stream(role: &str) -> bool {
@@ -307,4 +316,27 @@ async fn delete_stream(
         "id": id,
         "deleted": true,
     })))
+}
+
+async fn on_publish(
+    State((pool, _config)): State<(PgPool, Config)>,
+    axum::Form(payload): axum::Form<NginxCallback>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let s = stream::find_by_stream_key(&pool, &payload.name)
+        .await?
+    .ok_or_else(|| AppError::NotFound("stream not found".to_string()))?;
+
+    stream::set_live(&pool, s.id).await?;
+
+    Ok(axum::http::StatusCode::OK)
+}
+
+async fn on_done(
+    State((pool, _config)): State<(PgPool, Config)>,
+    axum::Form(payload): axum::Form<NginxCallback>,
+) -> Result<axum::http::StatusCode, AppError> {
+    if let Some(s) = stream::find_by_stream_key(&pool, &payload.name).await? {
+        stream::set_offline(&pool, s.id).await?;
+    }
+    Ok(axum::http::StatusCode::OK)
 }
