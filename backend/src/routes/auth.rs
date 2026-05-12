@@ -11,22 +11,24 @@ use crate::errors::AppError;
 use crate::middleware::auth::create_token;
 use crate::models::user::{self, CreateUser, LoginUser};
 
-/// Build the auth sub-router.
+/// Builds the /api/auth/* sub-router.
 pub fn router() -> Router<(PgPool, Config)> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
 }
 
-/// `POST /api/auth/register`
+/// POST /api/auth/register - create a user and return a fresh JWT.
 async fn register(
     State((pool, config)): State<(PgPool, Config)>,
     Json(body): Json<CreateUser>,
 ) -> Result<Json<Value>, AppError> {
+    //Reject empty fields up front.
     if body.username.trim().is_empty() || body.password.trim().is_empty() {
         return Err(AppError::BadRequest("username and password are required".to_string()));
     }
 
+    //Hash the password, write the row, issue a token.
     let hash = bcrypt::hash(&body.password, bcrypt::DEFAULT_COST)?;
     let new_user = user::create_user(&pool, &body.username, &hash).await?;
     let token = create_token(new_user.id, &config.jwt_secret)?;
@@ -39,7 +41,9 @@ async fn register(
     })))
 }
 
-/// `POST /api/auth/login`
+/// POST /api/auth/login - verify credentials and return a fresh JWT.
+/// All failure paths return the same generic 401 message to avoid leaking
+/// whether the username exists.
 async fn login(
     State((pool, config)): State<(PgPool, Config)>,
     Json(body): Json<LoginUser>,

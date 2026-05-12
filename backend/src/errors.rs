@@ -3,14 +3,15 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-/// Unified error type returned by route handlers.
+/// One error type every route returns. Maps to the appropriate HTTP status
+/// in `IntoResponse` and serializes as `{ "error": "<message>" }`.
 #[derive(Debug)]
 pub enum AppError {
-    NotFound(String),
-    Unauthorized(String),
-    Forbidden(String),
-    BadRequest(String),
-    Internal(String),
+    NotFound(String),      //404
+    Unauthorized(String),  //401 — bad/missing token
+    Forbidden(String),     //403 — token OK but not allowed
+    BadRequest(String),    //400 — bad input
+    Internal(String),      //500 — bug or downstream failure
 }
 
 impl std::fmt::Display for AppError {
@@ -18,7 +19,7 @@ impl std::fmt::Display for AppError {
         match self {
             Self::NotFound(msg) => write!(f, "Not found: {msg}"),
             Self::Unauthorized(msg) => write!(f, "Unauthorized: {msg}"),
-            Self:: Forbidden(msg) => write!(f, "Unauthorized: {msg}"),
+            Self::Forbidden(msg) => write!(f, "Forbidden: {msg}"),
             Self::BadRequest(msg) => write!(f, "Bad request: {msg}"),
             Self::Internal(msg) => write!(f, "Internal error: {msg}"),
         }
@@ -40,6 +41,7 @@ impl IntoResponse for AppError {
     }
 }
 
+//Lets us use `?` on sqlx queries from a route handler.
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
         tracing::error!("Database error: {err:?}");
@@ -47,6 +49,7 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
+//Same idea for bcrypt.
 impl From<bcrypt::BcryptError> for AppError {
     fn from(err: bcrypt::BcryptError) -> Self {
         tracing::error!("Bcrypt error: {err:?}");
