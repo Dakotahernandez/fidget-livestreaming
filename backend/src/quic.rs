@@ -500,17 +500,24 @@ fn spawn_ffmpeg(
     destination: &str,
 ) -> std::io::Result<tokio::process::Child> {
     let mut cmd = Command::new("ffmpeg");
+    //Input flags. We removed `discardcorrupt` here: it silently drops
+    //packets the demuxer thinks are damaged, which breaks GOPs because
+    //subsequent P-frames reference data that no longer exists. The
+    //symptom is blocky/tiled video that recovers on the next IDR.
+    //`probesize` and `analyzeduration` are kept small but non-zero so
+    //ffmpeg can correctly identify the stream params (framerate, pixel
+    //format) without adding noticeable startup latency.
     cmd.args([
         "-fflags",
-        "nobuffer+genpts+discardcorrupt",
+        "nobuffer+genpts",
         "-flags",
         "low_delay",
         "-err_detect",
         "ignore_err",
         "-probesize",
-        "32K",
+        "1M",
         "-analyzeduration",
-        "0",
+        "500000",
     ]);
 
     //Input container.
@@ -605,10 +612,22 @@ fn spawn_ffmpeg(
                 // playing while the video element stays black.
                 "-profile:v", "baseline",
                 "-level", "3.1",
-                "-g", "30",
-                "-keyint_min", "30",
+                // Constant 30 fps output. Screen capture is variable-rate;
+                // without `-vsync cfr -r 30` ffmpeg passes through the VFR
+                // PTS values, which combined with `-tune zerolatency` and
+                // libx264's reference-frame logic produces the tiled /
+                // misaligned-block artifacts the user reported.
+                "-vsync", "cfr",
+                "-r", "30",
+                // GOP = 0.5s, matching `hls_fragment 0.5` in srs.conf so
+                // every HLS segment begins on an IDR. With the previous
+                // 1s GOP, half the SRS segments started mid-GOP and the
+                // viewer's player rendered garbage until the next aligned
+                // segment.
+                "-g", "15",
+                "-keyint_min", "15",
                 "-sc_threshold", "0",
-                "-force_key_frames", "expr:gte(t,n_forced*1)",
+                "-force_key_frames", "expr:gte(t,n_forced*0.5)",
             ]);
             if r.video_kbps > 0 {
                 let b = format!("{}k", r.video_kbps);
