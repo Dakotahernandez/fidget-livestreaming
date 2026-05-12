@@ -186,7 +186,7 @@ async fn route_viewer(
     );
 
     Ok(Json(RouteResponse {
-        edge_url: format!("{}/hls/{}/index.m3u8", edge.url, stream_key),
+        edge_url: format!("{}/{}/index.m3u8", edge.url, stream_key),
         edge_id: edge.id.clone(),
         viewer_location,
     }))
