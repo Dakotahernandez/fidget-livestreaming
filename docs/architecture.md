@@ -1,92 +1,98 @@
 # Architecture
 
+This document describes the Fidget streaming platform as it actually
+ships today. For a higher-level prose tour with the team status table,
+see [TEAMREADME.md](../TEAMREADME.md).
+
 ## End-to-End Streaming Pipeline
 
-This diagram shows the full path of a live stream from the **streamer** through
-**ingest**, **transcoding**, the **control plane** (auth, geo-routing,
-metrics), out to **edge PoPs**, and finally to **viewers** on different client
-form factors.
+Two ingest paths coexist:
+
+- **Browser publish** — Chrome / Edge open a WebTransport (QUIC) session
+  to the Rust backend, which runs ffmpeg to fan the stream out to RTMP
+  renditions.
+- **OBS publish** — any RTMP encoder (OBS, ffmpeg, etc.) pushes directly
+  to the SRS media server. Used by Firefox / Safari users since neither
+  browser ships reliable WebTransport publish.
+
+Viewers connect via **WHEP (WebRTC) first** for sub-second playback,
+falling back to HLS when WebRTC fails (corporate firewalls, missing
+TURN, etc.).
 
 ```mermaid
 flowchart LR
     %% ===== Streamer (origin) =====
     subgraph SRC["Streamer (Origin)"]
         direction TB
-        ST[["Streamer Browser<br/>React + MediaRecorder<br/>WebTransport (QUIC)"]]
+        BR[["Browser (Chrome / Edge)<br/>React + MediaRecorder<br/>WebTransport (QUIC)"]]
+        OBS[["OBS / ffmpeg<br/>RTMP push"]]
     end
 
     %% ===== Ingest tier =====
     subgraph INGEST["Ingest Tier"]
         direction TB
-        QUIC["QUIC Ingest Server<br/>Rust + wtransport<br/>:4443/udp"]
-        FF["ffmpeg Transcoder<br/>WebM → H.264 / AAC"]
-        RTMP["nginx-rtmp<br/>RTMP → HLS<br/>:1935"]
-        HLS[("HLS Segments<br/>shared volume")]
+        QUIC["QUIC Ingest Server<br/>Rust + wtransport<br/>:4443/udp<br/>10-day cert rotation"]
+        FF["ffmpeg fan-out<br/>libx264 + AAC<br/>source / 480p / 360p"]
+        SRS["SRS 5 Media Server<br/>RTMP :1935 - HTTP :8088<br/>WebRTC :8200/udp - API :1985"]
+        HLS[("HLS Segments<br/>shared volume<br/>/tmp/hls/hls/&lt;key&gt;/")]
     end
 
     %% ===== Control plane =====
     subgraph CTRL["Control Plane"]
         direction TB
-        API["Axum REST API<br/>auth · streams · cert-hash<br/>:8080"]
-        DB[("PostgreSQL 16<br/>users · streams")]
+        API["Axum REST API<br/>auth - streams - chat<br/>admin - role-applications<br/>cert-hash :8080"]
+        DB[("PostgreSQL 16<br/>users - streams<br/>role_applications - chat")]
         ROUTER["Geo Router<br/>MaxMind GeoLite2<br/>:8070"]
-        MON["Prometheus + Grafana<br/>metrics & dashboards"]
     end
 
     %% ===== Edge / CDN tier =====
-    subgraph EDGES["Edge Delivery Tier (PoPs)"]
+    subgraph EDGES["Edge Delivery Tier"]
         direction TB
-        E1["Edge PoP — US-East<br/>nginx :8090"]
-        E2["Edge PoP — US-West<br/>nginx :8090"]
-        E3["Edge PoP — EU<br/>nginx :8090"]
+        EDGE["Edge nginx<br/>:8090<br/>HLS shared volume (ro)"]
+        CF["CloudFront (prod)<br/>opt-in via<br/>CLOUDFRONT_DOMAIN"]
     end
 
     %% ===== Clients =====
-    subgraph CLIENTS["Viewers / Clients"]
+    subgraph CLIENTS["Viewers"]
         direction TB
-        CW["Web Browser<br/>HLS.js Player"]
-        CM["Mobile Browser<br/>native HLS"]
-        CT["Smart TV / OTT App<br/>HLS"]
+        VW["Web Browser<br/>WHEP first → HLS fallback<br/>hls.js / native HLS"]
     end
 
     %% ----- Streamer control flow -----
-    ST -- "REST: login, create stream,<br/>fetch cert-hash (JWT)" --> API
+    BR -- "REST: login - create stream<br/>fetch cert-hash" --> API
     API -- "SQL" --> DB
 
-    %% ----- Streamer media flow -----
-    ST == "QUIC datagrams<br/>(fragmented WebM)" ==> QUIC
+    %% ----- Browser ingest media path -----
+    BR == "WebTransport unidirectional<br/>stream (WebM / fMP4)" ==> QUIC
     QUIC -- "validate JWT &<br/>stream ownership" --> DB
-    QUIC == "reassembled chunks<br/>(stdin pipe)" ==> FF
-    FF == "RTMP / FLV" ==> RTMP
-    RTMP == "writes .m3u8 + .ts" ==> HLS
+    QUIC == "stdin pipe" ==> FF
+    FF == "RTMP × N renditions" ==> SRS
 
-    %% ----- Fan-out to edges -----
-    HLS == "pull / shared volume" ==> E1
-    HLS == "pull / shared volume" ==> E2
-    HLS == "pull / shared volume" ==> E3
+    %% ----- OBS ingest path -----
+    OBS == "RTMP / FLV<br/>(H.264 + AAC)" ==> SRS
+    SRS -- "on_publish callback<br/>(JSON)" --> API
+
+    %% ----- HLS write & fan-out -----
+    SRS == "writes index.m3u8 + .ts" ==> HLS
+    HLS == "shared volume (ro)" ==> EDGE
+    HLS == "origin pull" ==> CF
 
     %% ----- Viewer routing -----
-    CW -- "GET /api/route/:stream_id" --> ROUTER
-    CM -- "GET /api/route/:stream_id" --> ROUTER
-    CT -- "GET /api/route/:stream_id" --> ROUTER
-    ROUTER -- "GeoIP lookup" --> DB
-    ROUTER -. "nearest edge URL" .-> CW
-    ROUTER -. "nearest edge URL" .-> CM
-    ROUTER -. "nearest edge URL" .-> CT
+    VW -- "POST /streams/:id/join<br/>(returns hls_url)" --> API
+    VW -- "GET /router-api/route/:key" --> ROUTER
+    ROUTER -. "edge URL<br/>(CloudFront or edge-local)" .-> VW
 
-    %% ----- Viewer playback -----
-    CW == "HLS (.m3u8 / .ts)" ==> E1
-    CM == "HLS (.m3u8 / .ts)" ==> E2
-    CT == "HLS (.m3u8 / .ts)" ==> E3
+    %% ----- Viewer playback (WHEP first) -----
+    VW == "POST /whep/ (SDP offer)<br/>via frontend nginx → SRS :1985" ==> SRS
+    SRS == "WebRTC media (DTLS/SRTP)<br/>UDP :8200" ==> VW
 
-    %% ----- Observability -----
-    QUIC -. metrics .-> MON
-    API  -. metrics .-> MON
-    RTMP -. metrics .-> MON
-    ROUTER -. metrics .-> MON
-    E1 -. metrics .-> MON
-    E2 -. metrics .-> MON
-    E3 -. metrics .-> MON
+    %% ----- Viewer playback (HLS fallback) -----
+    VW == "GET /hls/&lt;key&gt;/index.m3u8" ==> EDGE
+    VW == "GET /hls/&lt;key&gt;/*.ts (prod)" ==> CF
+
+    %% ----- Chat (QUIC) -----
+    BR == "WebTransport chat stream<br/>:4443/udp" ==> QUIC
+    VW == "WebTransport chat stream<br/>:4443/udp" ==> QUIC
 
     %% ----- Styling -----
     classDef origin   fill:#fde68a,stroke:#b45309,color:#1f2937;
@@ -96,17 +102,17 @@ flowchart LR
     classDef client   fill:#fecaca,stroke:#b91c1c,color:#1f2937;
     classDef store    fill:#e5e7eb,stroke:#374151,color:#1f2937;
 
-    class ST origin;
-    class QUIC,FF,RTMP ingest;
-    class API,ROUTER,MON control;
-    class E1,E2,E3 edge;
-    class CW,CM,CT client;
+    class BR,OBS origin;
+    class QUIC,FF,SRS ingest;
+    class API,ROUTER control;
+    class EDGE,CF edge;
+    class VW client;
     class DB,HLS store;
 ```
 
 **Legend**
 
-- **Thick solid arrows (`==>`)** — hot media path (video bytes).
+- **Thick solid arrows (`==>`)** — hot media path (video / audio bytes).
 - **Thin solid arrows (`-->`)** — synchronous control / REST calls.
 - **Dotted arrows (`-.->`)** — asynchronous responses or telemetry.
 - Colors group nodes by tier: origin, ingest, control plane, edge, clients,
@@ -183,105 +189,6 @@ trusts for the RTMP publish path. No JWT plumbing into SRS is required.
 RTMP origin, so the HLS packager, edge cache, and player code are unchanged
 regardless of which browser the streamer used.
 
-## System Overview
-
-```mermaid
-graph TB
-    subgraph Streamer
-        B[Browser<br/>React + WebTransport]
-    end
-
-    subgraph Backend
-        API[Axum REST API<br/>:8080/tcp]
-        QUIC[QUIC Ingest Server<br/>:4443/udp]
-        FF[ffmpeg<br/>WebM → H.264/AAC]
-    end
-
-    subgraph Storage
-        DB[(PostgreSQL<br/>users, streams)]
-    end
-
-    subgraph Ingest
-        RTMP[nginx-rtmp<br/>:1935]
-        HLS[HLS Segments<br/>/tmp/hls]
-    end
-
-    subgraph Delivery
-        EDGE[Edge Server<br/>nginx :8090]
-        ROUTER[Router<br/>GeoIP :8070]
-    end
-
-    subgraph Viewer
-        VB[Browser<br/>HLS.js Player]
-    end
-
-    B -- "QUIC datagrams<br/>(video fragments)" --> QUIC
-    B -- "REST<br/>(auth, streams, cert-hash)" --> API
-    API -- "SQL" --> DB
-    QUIC -- "reassembled chunks<br/>(stdin pipe)" --> FF
-    FF -- "RTMP/FLV" --> RTMP
-    RTMP -- "writes .m3u8 + .ts" --> HLS
-    HLS -- "shared volume (ro)" --> EDGE
-    VB -- "GET /hls/*" --> EDGE
-    VB -- "GET /api/route/:stream_id" --> ROUTER
-    ROUTER -- "nearest edge URL" --> VB
-    QUIC -- "validates JWT,<br/>checks stream ownership" --> DB
-```
-
-## Request Flows
-
-### Streamer: Go Live
-
-```mermaid
-sequenceDiagram
-    participant Browser
-    participant REST as Backend (REST :8080)
-    participant QUIC as Backend (QUIC :4443)
-    participant ffmpeg
-    participant RTMP as nginx-rtmp
-
-    Browser->>REST: POST /api/auth/login
-    REST-->>Browser: JWT token
-
-    Browser->>REST: POST /api/streams {title}
-    REST-->>Browser: {id, stream_key}
-
-    Browser->>REST: GET /api/transport/cert-hash
-    REST-->>Browser: {sha-256 hash}
-
-    Browser->>QUIC: WebTransport handshake (cert hash + JWT in query)
-    QUIC->>QUIC: validate JWT and verify stream ownership
-    QUIC-->>Browser: session established
-
-    loop every 250ms
-        Browser->>QUIC: datagram fragments (video chunk)
-        QUIC->>QUIC: reassemble fragments
-        QUIC->>ffmpeg: pipe reassembled WebM chunk
-    end
-
-    ffmpeg->>RTMP: RTMP/FLV (H.264 + AAC)
-    RTMP->>RTMP: generate HLS .m3u8 + .ts
-```
-
-### Viewer: Watch Stream
-
-```mermaid
-sequenceDiagram
-    participant Viewer as Viewer Browser
-    participant Router as Router (:8070)
-    participant Edge as Edge Server (:8090)
-
-    Viewer->>Router: GET /api/route/:stream_id
-    Router->>Router: GeoIP lookup, pick nearest edge
-    Router-->>Viewer: {edge_url}
-    Viewer->>Edge: GET /hls/:stream_key/index.m3u8
-    Edge-->>Viewer: HLS playlist
-    loop playback
-        Viewer->>Edge: GET /hls/:stream_key/segmentN.ts
-        Edge-->>Viewer: video segment
-    end
-```
-
 ## Container Layout
 
 ```mermaid
@@ -289,46 +196,292 @@ graph LR
     subgraph docker-compose
         DB[(db<br/>postgres:16)]
         BE[backend<br/>Rust + ffmpeg<br/>:8080 + :4443/udp]
-        FE[frontend<br/>React + Vite<br/>:3000]
-        MS[ingest-server<br/>nginx-rtmp<br/>:1935 + :8088]
+        FE[frontend<br/>nginx + Vite build<br/>:3000]
+        MS[media-server<br/>SRS 5<br/>:1935 + :8088 + :1985<br/>+ :8200/udp]
         EDGE[edge<br/>nginx<br/>:8090]
         RT[router<br/>Rust + GeoIP<br/>:8070]
+        TURN[coturn<br/>profile: turn<br/>:3478 + :49160-49200/udp]
     end
 
     BE --> DB
-    BE -- RTMP --> MS
-    MS -- "HLS volume" --> EDGE
-    FE --> BE
+    BE -- "RTMP × N renditions" --> MS
+    MS -- "HLS shared volume (rw)" --> EDGE
+    MS -- "on_publish HTTP callback" --> BE
+    FE -- "/api → backend" --> BE
+    FE -- "/router-api → router" --> RT
+    FE -- "/hls → media-server:8088" --> MS
+    FE -- "/whep → media-server:1985" --> MS
     RT --> BE
 ```
 
-## QUIC Datagram Fragment Protocol
+## Frontend nginx Proxy Map
 
-Each MediaRecorder chunk (~10–100 KB) is split into QUIC datagrams with an 8-byte header:
+The frontend container is plain nginx serving the React build. All
+cross-service browser traffic is reverse-proxied through it so the
+browser only ever talks to one origin (`http://localhost:3000` in dev,
+the public hostname in prod). This avoids CORS preflights and keeps
+HTTPS clean in production.
+
+| Browser path        | Proxied to                                | Purpose                              |
+|---------------------|-------------------------------------------|--------------------------------------|
+| `/`                 | static React SPA                          | UI                                   |
+| `/api/`             | `backend:8080`                            | REST: auth, streams, chat, admin     |
+| `/router-api/`      | `router:8070/api/`                        | Edge selection (`/route/:key`)       |
+| `/hls/`             | `media-server:8088`                       | HLS playlists & TS segments          |
+| `/whep/`            | `media-server:1985/rtc/v1/whep/`          | WHEP signalling (SDP exchange)       |
+
+WebTransport ingest (`https://<host>:4443/...`) and the WebRTC media
+plane (`UDP :8200`) bypass nginx because they are not HTTP.
+
+## Request Flows
+
+### Browser publish (Chrome / Edge)
 
 ```mermaid
-graph TD
-    CHUNK[MediaRecorder chunk<br/>~50 KB] --> SPLIT{split into<br/>~1200-byte datagrams}
-    SPLIT --> D0["Datagram 0<br/>[chunk_id | frag 0/N | payload]"]
-    SPLIT --> D1["Datagram 1<br/>[chunk_id | frag 1/N | payload]"]
-    SPLIT --> DN["Datagram N<br/>[chunk_id | frag N/N | payload]"]
+sequenceDiagram
+    participant Browser
+    participant REST as Backend REST (:8080)
+    participant QUIC as Backend QUIC (:4443)
+    participant ffmpeg
+    participant SRS as SRS (:1935 / :8088)
 
-    RX[Server receives datagrams] --> CHECK{all fragments<br/>for chunk_id?}
-    CHECK -- yes --> REASSEMBLE[reassemble in order<br/>and pipe to ffmpeg]
-    CHECK -- "no, newer chunk arrived" --> EVICT[evict stale chunk]
-    CHECK -- "no, still waiting" --> WAIT[buffer and wait]
+    Browser->>REST: POST /api/auth/login
+    REST-->>Browser: JWT
+    Browser->>REST: POST /api/streams { title }
+    REST-->>Browser: { id, stream_key }
+
+    Browser->>REST: GET /api/transport/cert-hash
+    REST-->>Browser: { sha-256 hash }
+
+    Browser->>QUIC: WebTransport handshake<br/>(serverCertificateHashes + JWT in URL)
+    QUIC->>QUIC: validate JWT, verify ownership
+    QUIC-->>Browser: session accepted
+
+    Browser->>QUIC: createUnidirectionalStream() + 0x00 priming byte
+    Note over QUIC: detect_input_format()<br/>scans first ≤ 64 KB for WebM EBML or<br/>fMP4 ftyp box
+
+    loop every 100 ms timeslice
+        Browser->>QUIC: WebM cluster / fMP4 fragment
+        QUIC->>ffmpeg: stdin write
+    end
+
+    ffmpeg->>SRS: RTMP push × 3 renditions<br/>(<key>, <key>_480p, <key>_360p)
+    SRS->>REST: on_publish callback (per rendition)
+    REST-->>SRS: 200 OK / 0 (accept)
+    SRS->>SRS: write HLS to /tmp/hls/hls/<key>/
+    SRS->>SRS: bridge RTMP → WebRTC for WHEP
 ```
+
+Notes:
+
+- The frontend uses a **single ordered unidirectional stream** instead
+  of the older datagram-fragment protocol. Datagrams had flaky
+  cross-browser support (Firefox in particular silently dropped them);
+  ordered streams give us reliable in-order WebM / fMP4 delivery and
+  removed an entire reassembly path on the server.
+- The 1-byte priming write forces the QUIC `STREAM` frame onto the
+  wire immediately so the backend's `accept_uni()` doesn't stall when
+  MediaRecorder is slow to emit its first chunk.
+- The QUIC server's self-signed certificate is **rotated every 10 days**
+  (Chrome's WebTransport spec rejects `serverCertificateHashes` certs
+  whose validity period exceeds 14 days). The cert-hash route reads
+  from a shared `Arc<RwLock<String>>` so subsequent "Go Live" clicks
+  always pin the cert that's currently in force.
+
+### OBS publish
+
+```mermaid
+sequenceDiagram
+    participant OBS
+    participant SRS as SRS (:1935)
+    participant REST as Backend REST (:8080)
+
+    OBS->>SRS: RTMP connect "live/<stream_key>"
+    SRS->>REST: POST /api/internal/rtmp/on_publish<br/>(JSON: { stream: "<key>" })
+    REST->>REST: lookup stream_key, check role
+    REST-->>SRS: 200 / "0" (accept) or 403 (reject)
+    Note over SRS: SRS writes HLS to /tmp/hls/hls/<key>/<br/>and bridges RTMP → WebRTC
+```
+
+OBS is the recommended publish path for Firefox and Safari users since
+neither browser ships WebTransport with `serverCertificateHashes`
+enabled by default.
+
+### Viewer: watch a stream
+
+```mermaid
+sequenceDiagram
+    participant V as Viewer Browser
+    participant REST as Backend REST (:8080)
+    participant Router as Router (:8070)
+    participant SRS as SRS (via /whep/ proxy)
+    participant Edge as Edge / CloudFront
+
+    V->>REST: GET /api/streams/:id
+    REST-->>V: { stream metadata, requires_password }
+    V->>REST: POST /api/streams/:id/join { password? }
+    REST-->>V: { hls_url, stream_key, chat_access_token }
+
+    V->>Router: GET /router-api/route/:stream_key
+    Router-->>V: { edge_url, edge_id }
+
+    Note over V: Try WHEP first (≤ 3.5 s timeout)
+    V->>SRS: POST /whep/?app=live&stream=<key><br/>SDP offer
+    SRS-->>V: SDP answer
+    SRS-->>V: WebRTC media (UDP :8200)
+
+    Note over V,Edge: HLS fallback if WHEP fails
+    V->>Edge: GET /hls/<key>/index.m3u8
+    Edge-->>V: playlist
+    loop playback
+        V->>Edge: GET /hls/<key>/<seq>.ts
+        Edge-->>V: segment
+    end
+```
+
+## HLS Path Conventions
+
+SRS writes segments under a nested directory so a single HTTP server
+rooted at `/tmp/hls` exposes them at the same URL shape the backend
+hands out:
+
+| File                    | On disk                                  | URL                                  |
+|-------------------------|------------------------------------------|--------------------------------------|
+| Playlist                | `/tmp/hls/hls/<key>/index.m3u8`          | `/hls/<key>/index.m3u8`              |
+| Segments                | `/tmp/hls/hls/<key>/<seq>.ts`            | `/hls/<key>/<seq>.ts`                |
+| 480p rendition playlist | `/tmp/hls/hls/<key>_480p/index.m3u8`     | `/hls/<key>_480p/index.m3u8`         |
+| 360p rendition playlist | `/tmp/hls/hls/<key>_360p/index.m3u8`     | `/hls/<key>_360p/index.m3u8`         |
+
+The edge container mounts the same `hls_segments` Docker volume
+**read-only** so it can serve segments directly without an extra HTTP
+hop to the origin. Production deployments put CloudFront in front of
+the edge for global fan-out; the URL shape is identical.
+
+## Encoding Ladder
+
+The backend's ffmpeg pipeline forks the decoded video stream once and
+fans out to three RTMP outputs:
+
+| Rendition | Resolution         | Video bitrate | Audio bitrate |
+|-----------|--------------------|---------------|---------------|
+| source    | input native       | input native  | 128 kbps      |
+| 480p      | scale fit 854×480  | 1000 kbps     | 96 kbps       |
+| 360p      | scale fit 640×360  | 600 kbps      | 64 kbps       |
+
+The viewer's "Quality" dropdown selects a rendition by appending the
+suffix (`_480p`, `_360p`) to the stream key for both WHEP and HLS URLs.
+There is no automatic ABR — the user picks.
+
+## Routing Precedence
+
+The geo router resolves the edge URL for a stream key in this order:
+
+1. `EDGE_SERVERS` env (`id,url,lat,lon;...`) → MaxMind Haversine pick.
+2. `CLOUDFRONT_DOMAIN` env → single CloudFront edge.
+3. Local fallback: `http://edge:8090`.
+
+The same precedence is mirrored in the backend's `join_stream` handler
+when it builds the absolute or relative `hls_url` returned to the
+viewer.
+
+## Auth, Roles, and Admin Bootstrap
+
+- JWTs are issued by `/api/auth/login` and required for stream creation,
+  WebTransport ingest, and chat.
+- Roles: `admin`, `streamer`, regular user.
+- The admin row is upserted from `ADMIN_USERNAME` / `ADMIN_PASSWORD` env
+  vars on every backend boot (`db::ensure_admin_user`), so a new
+  deployment ships with a working admin account.
+- Regular users can request the `streamer` role through the
+  `role_applications` table; admins approve / deny from `/admin`.
 
 ## Technology Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | React, Vite, HLS.js |
-| REST API | Rust, Axum, SQLx |
-| Video Ingest | QUIC datagrams via wtransport |
-| Transcoding | ffmpeg (WebM → H.264/AAC → RTMP) |
-| Media Server | nginx-rtmp (RTMP → HLS) |
-| Edge Delivery | nginx (static HLS) |
-| Geo-Routing | Rust, MaxMind GeoLite2 |
-| Database | PostgreSQL 16 |
-| Auth | JWT (jsonwebtoken crate) |
+| Layer            | Technology                                          |
+|------------------|-----------------------------------------------------|
+| Frontend         | React, Vite, hls.js, native WebRTC / WebTransport   |
+| REST API         | Rust, Axum, SQLx                                    |
+| Browser ingest   | WebTransport unidirectional streams via wtransport  |
+| Transcoding      | ffmpeg (libx264, AAC LC), filter_complex split fan-out |
+| Media server     | SRS 5 (RTMP, WebRTC bridge, HLS, HTTP API)          |
+| Edge delivery    | nginx (HLS), shared Docker volume                   |
+| CDN (prod)       | CloudFront (opt-in via `CLOUDFRONT_DOMAIN`)         |
+| TURN (optional)  | coturn (`--profile turn`)                           |
+| Geo-routing      | Rust, MaxMind GeoLite2                              |
+| Database         | PostgreSQL 16                                       |
+| Auth             | JWT (`jsonwebtoken` crate) + `bcrypt`               |
+| Container runtime| Docker Compose                                      |
+
+## Chat Transport (WebTransport + WebSocket Fallback)
+
+Chat uses the same per-stream broadcast bus on the backend, but the
+client picks one of two transports depending on browser capability:
+
+- **WebTransport (`:4443/udp`)** — preferred path on Chromium browsers.
+  Reuses the QUIC stack already stood up for video ingest, with a
+  dedicated bidirectional stream per chat session and a short-lived
+  `chat_access_token` minted by `POST /api/streams/:id/join`.
+- **WebSocket fallback (`/api/chat/streams/:id/ws?token=<jwt>`)** —
+  used when WebTransport isn't available (Firefox, Safari) or fails to
+  connect. The token is passed as a query parameter because browsers
+  don't allow custom headers on `new WebSocket(...)`. Both transports
+  speak the same line-delimited JSON protocol so the server-side
+  broadcast loop is identical.
+
+```mermaid
+flowchart LR
+    subgraph CHROMIUM["Chromium browsers"]
+        CC["StreamChat.jsx<br/>connectViaWebTransport()"]
+    end
+
+    subgraph OTHERS["Firefox &amp; Safari (and any WT failure)"]
+        WC["StreamChat.jsx<br/>connectViaWebSocket()"]
+    end
+
+    subgraph BACKEND["Backend"]
+        QC["QUIC chat handler<br/>:4443/udp"]
+        WSH["WebSocket handler<br/>/api/chat/streams/:id/ws"]
+        BUS["Per-stream broadcast bus<br/>(tokio::sync::broadcast)"]
+        DB[("PostgreSQL<br/>chat_messages")]
+    end
+
+    CC == "WebTransport bidi stream<br/>(chat_access_token)" ==> QC
+    WC == "WebSocket frames<br/>(?token=...)" ==> WSH
+    QC --> BUS
+    WSH --> BUS
+    BUS -. "fan-out" .-> CC
+    BUS -. "fan-out" .-> WC
+    BUS -- "persist" --> DB
+
+    classDef chromium fill:#bfdbfe,stroke:#1d4ed8,color:#1f2937;
+    classDef other    fill:#fde68a,stroke:#b45309,color:#1f2937;
+    classDef backend  fill:#ddd6fe,stroke:#6d28d9,color:#1f2937;
+    classDef store    fill:#e5e7eb,stroke:#374151,color:#1f2937;
+
+    class CC chromium;
+    class WC other;
+    class QC,WSH,BUS backend;
+    class DB store;
+```
+
+The frontend tries WebTransport first and silently falls back to the
+WebSocket route on any handshake or stream-open failure, so the user
+never sees a degraded experience.
+
+## Browser Support Matrix
+
+| Capability                        | Chrome / Edge | Firefox          | Safari          |
+|-----------------------------------|---------------|------------------|-----------------|
+| Browser publish (WebTransport)    | Yes           | No (pref-gated)  | No              |
+| Browser publish (WHIP fallback)   | Yes           | Yes              | Yes             |
+| OBS / RTMP publish                | Yes           | Yes              | Yes             |
+| Watch via WHEP (WebRTC)           | Yes           | Yes              | Yes             |
+| Watch via HLS fallback            | Yes (hls.js)  | Yes (hls.js)     | Yes (native)    |
+| Chat (WebTransport)               | Yes           | No (pref-gated)  | No              |
+| Chat (WebSocket fallback)         | Yes           | Yes              | Yes             |
+
+The streamer client picks WebTransport when available and WHIP otherwise,
+so all four major browsers can broadcast directly from the page. OBS
+remains supported as a third option for users who already have an
+encoder configured. Chat behaves the same way: WebTransport first,
+WebSocket fallback so every viewer can still post messages.
