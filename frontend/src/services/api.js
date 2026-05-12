@@ -72,11 +72,19 @@ export const deleteStream = (id) =>
 export const getCertHash = () =>
   api.get('/transport/cert-hash');
 
+// Hostname browsers dial for WebTransport/QUIC ingest. Defaults to the
+// page's own hostname (works for local docker), but can be overridden at
+// build time with VITE_WEBTRANSPORT_HOST. This is required when the SPA is
+// served through a CDN (e.g. CloudFront) that cannot proxy UDP — the
+// override should point at a hostname that resolves directly to the
+// backend instance with UDP/4443 open in its security group.
+const WEBTRANSPORT_HOST =
+  import.meta.env.VITE_WEBTRANSPORT_HOST || (typeof window !== 'undefined' ? window.location.hostname : '');
+const WEBTRANSPORT_PORT = 4443;
+
 export const getTransportUrl = (streamId) => {
   const token = getStoredToken();
-  const host = window.location.hostname;
-  const quicPort = 4443;
-  return `https://${host}:${quicPort}/ingest/${streamId}?token=${token}`;
+  return `https://${WEBTRANSPORT_HOST}:${WEBTRANSPORT_PORT}/ingest/${streamId}?token=${token}`;
 };
 
 // Same-origin WHIP (WebRTC-HTTP Ingestion Protocol) URL. Used by the
@@ -124,9 +132,7 @@ export const listChatMessages = (streamId, chatToken) =>
 
 export const getChatTransportUrl = (streamId, chatToken) => {
   if (!chatToken) return null;
-  const host = window.location.hostname;
-  const quicPort = 4443;
-  return `https://${host}:${quicPort}/chat/${streamId}?chat_token=${encodeURIComponent(chatToken)}`;
+  return `https://${WEBTRANSPORT_HOST}:${WEBTRANSPORT_PORT}/chat/${streamId}?chat_token=${encodeURIComponent(chatToken)}`;
 };
 
 // WebSocket fallback for browsers without WebTransport (Firefox, Safari).
