@@ -34,8 +34,10 @@ const EMPTY_PLAYBACK_METRICS = {
 const WHEP_PATH = '/whep/';
 const WHEP_APP = 'live';
 // How long we wait for the WHEP peer connection to deliver its first
-// video frame before giving up and falling back to HLS.
-const WHEP_FIRST_FRAME_TIMEOUT_MS = 3500;
+// video frame before giving up and falling back to HLS. Kept short so a
+// blocked UDP path (e.g. EC2 SG missing UDP 8000) doesn't leave the
+// viewer staring at a black player for seconds before HLS takes over.
+const WHEP_FIRST_FRAME_TIMEOUT_MS = 1500;
 
 /// Fetch the deployment-specific ICE server list from the backend. Falls
 /// back to a public STUN-only config so first-time deployments still get

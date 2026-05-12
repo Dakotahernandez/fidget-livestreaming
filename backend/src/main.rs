@@ -41,12 +41,35 @@ async fn main() {
 
     tracing::info!("Database connected");
 
+    //Loud startup warning if the WebRTC ICE candidate is missing or
+    //loopback. SRS reads `$CANDIDATE` directly from its config, but
+    //operators usually only check the backend logs — surfacing it here
+    //makes the "WHIP/WHEP doesn't work in production" failure mode
+    //immediately diagnosable.
+    let candidate = std::env::var("CANDIDATE").unwrap_or_default();
+    if candidate.is_empty() || candidate == "127.0.0.1" || candidate == "localhost" {
+        tracing::warn!(
+            candidate = %candidate,
+            "CANDIDATE is unset or loopback. WebRTC (WHIP publish + WHEP \
+             playback) will not work for remote clients. Set CANDIDATE to \
+             the public host IP / DNS in .env and ensure UDP 8000 is open \
+             in the security group."
+        );
+    } else {
+        tracing::info!(candidate = %candidate, "WebRTC candidate configured");
+    }
+
     //Shared in-memory chat state. Holds per-stream broadcast channels.
     let chat_state = quic_chat::ChatState::new();
 
     //Registry of running WHIP rendition-ladder ffmpeg supervisors.
     //Populated by `on_publish` (source key), drained by `on_publish_done`.
     let ladder_registry = transcode::new_registry();
+
+    //Debouncer for `on_publish_done` so transient SRS renegotiations
+    //(e.g. WHEP viewers churning the rtc_to_rtmp bridge) don't immediately
+    //flip the stream offline.
+    let offline_debouncer = routes::internal::new_debouncer();
 
     //Start the QUIC/WebTransport server. Returns the self-signed cert hash
     //which is served to browsers so they can trust it via serverCertificateHashes.
@@ -81,6 +104,7 @@ async fn main() {
         .layer(Extension(cert_hash))
         .layer(Extension(chat_state))
         .layer(Extension(ladder_registry))
+        .layer(Extension(offline_debouncer))
         .layer(cors)
         .with_state(state);
 

@@ -8,16 +8,26 @@ see [TEAMREADME.md](../TEAMREADME.md).
 
 Two ingest paths coexist:
 
-- **Browser publish** — Chrome / Edge open a WebTransport (QUIC) session
-  to the Rust backend, which runs ffmpeg to fan the stream out to RTMP
-  renditions.
-- **OBS publish** — any RTMP encoder (OBS, ffmpeg, etc.) pushes directly
-  to the SRS media server. Used by Firefox / Safari users since neither
-  browser ships reliable WebTransport publish.
+- **Browser publish (WebTransport)** — Chromium browsers (Chrome,
+  Edge, Brave, Opera, Arc, Vivaldi) open a WebTransport (QUIC) session
+  to the Rust backend, which runs ffmpeg to fan the stream out to
+  multiple RTMP renditions in a single decode pass.
+- **Browser publish (WHIP)** — Firefox, Safari, and any deployment
+  where the WebTransport UDP path is unreachable (e.g. behind a CDN
+  that can't proxy UDP) post an SDP offer to SRS's WHIP endpoint. SRS
+  bridges the WebRTC publish into RTMP, the backend's `on_publish`
+  callback fires, and a supervised ffmpeg "WHIP rendition ladder"
+  pulls the bridged RTMP source and pushes derived 720p / 360p RTMP
+  outputs back to SRS. The bare publish key serves as the "Source"
+  tier (no extra encode), keeping the WHIP path lean.
+- **OBS publish** — any RTMP encoder (OBS, ffmpeg, etc.) pushes
+  directly to the SRS media server.
 
 Viewers connect via **WHEP (WebRTC) first** for sub-second playback,
 falling back to HLS when WebRTC fails (corporate firewalls, missing
-TURN, etc.).
+TURN, etc.). The first-frame timeout is **1.5 s** so a blocked UDP
+path (e.g. EC2 security group missing UDP 8000) doesn't leave the
+viewer staring at a black player before HLS takes over.
 
 ```mermaid
 flowchart LR
@@ -32,7 +42,7 @@ flowchart LR
     subgraph INGEST["Ingest Tier"]
         direction TB
         QUIC["QUIC Ingest Server<br/>Rust + wtransport<br/>:4443/udp<br/>10-day cert rotation"]
-        FF["ffmpeg fan-out<br/>libx264 + AAC<br/>source / 480p / 360p"]
+        FF["ffmpeg fan-out<br/>libx264 + AAC<br/>source / 1080p / 720p / 360p"]
         SRS["SRS 5 Media Server<br/>RTMP :1935 - HTTP :8088<br/>WebRTC :8200/udp - API :1985"]
         HLS[("HLS Segments<br/>shared volume<br/>/tmp/hls/hls/&lt;key&gt;/")]
     end
@@ -48,8 +58,9 @@ flowchart LR
     %% ===== Edge / CDN tier =====
     subgraph EDGES["Edge Delivery Tier"]
         direction TB
-        EDGE["Edge nginx<br/>:8090<br/>HLS shared volume (ro)"]
-        CF["CloudFront (prod)<br/>opt-in via<br/>CLOUDFRONT_DOMAIN"]
+        EDGE["Edge nginx (local dev)<br/>:8090<br/>HLS shared volume (ro)"]
+        S3[("AWS S3 (prod origin)<br/>HLS bucket<br/>&lt;key&gt;/index.m3u8 + *.ts")]
+        CF["AWS CloudFront (prod)<br/>fronts S3 origin<br/>CLOUDFRONT_DOMAIN"]
     end
 
     %% ===== Clients =====
@@ -75,7 +86,8 @@ flowchart LR
     %% ----- HLS write & fan-out -----
     SRS == "writes index.m3u8 + .ts" ==> HLS
     HLS == "shared volume (ro)" ==> EDGE
-    HLS == "origin pull" ==> CF
+    HLS == "sync (prod)" ==> S3
+    S3 == "origin pull" ==> CF
 
     %% ----- Viewer routing -----
     VW -- "POST /streams/:id/join<br/>(returns hls_url)" --> API
@@ -175,19 +187,69 @@ flowchart LR
 
 **Transport selection logic** (in [`ScreenCapture.jsx`](../frontend/src/components/streamer/ScreenCapture.jsx)):
 
-| Capability check                            | Chosen ingest transport |
-|---------------------------------------------|-------------------------|
-| `globalThis.WebTransport` is a function     | WebTransport (preferred) |
-| Otherwise `RTCPeerConnection` is a function | WHIP / WebRTC fallback   |
-| Neither is available                        | UI disables Go Live      |
+| Capability check                              | Chosen ingest transport |
+|-----------------------------------------------|-------------------------|
+| `VITE_DISABLE_WEBTRANSPORT=1` build arg set   | WHIP (forced)           |
+| Otherwise `globalThis.WebTransport` available | WebTransport            |
+| Otherwise `RTCPeerConnection` is a function   | WHIP / WebRTC fallback  |
+| Neither is available                          | UI disables Go Live     |
+
+The `VITE_DISABLE_WEBTRANSPORT` escape hatch (wired through
+[`docker-compose.yml`](../docker-compose.yml) →
+[`frontend/Dockerfile`](../frontend/Dockerfile)) forces every browser
+onto the WHIP path. This is required for deployments behind CDNs that
+can't proxy UDP (CloudFront, most managed front-doors), where the
+WebTransport UDP/4443 ingest is unreachable from the public internet.
 
 **Same auth model** — the WHIP URL embeds the existing per-stream
 `stream_key` (`/whip/?app=live&stream=<key>`), the same secret SRS already
 trusts for the RTMP publish path. No JWT plumbing into SRS is required.
 
 **Same downstream path** — SRS bridges the WebRTC RTP into its internal
-RTMP origin, so the HLS packager, edge cache, and player code are unchanged
-regardless of which browser the streamer used.
+RTMP origin (gated by `rtc_to_rtmp on` in
+[`media-server/srs.conf`](../media-server/srs.conf)), so the HLS
+packager, edge cache, and player code are unchanged regardless of which
+browser the streamer used.
+
+**Transient ICE handling on the publisher.** The streamer-side
+`RTCPeerConnection` only treats `failed` and `closed` as terminal
+states. `disconnected` is a transient lifecycle state (W3C WebRTC) —
+ICE often recovers within a few seconds, e.g. when a WHEP viewer
+refreshing momentarily perturbs SRS's `rtc_to_rtmp` bridge. Combined
+with the backend's 3 s `on_publish_done` debounce (see *Browser publish
+(WHIP)* above), this means a brief SRS hiccup no longer ends the
+broadcast from the streamer's perspective. See
+[`frontend/src/components/streamer/ScreenCapture.jsx`](../frontend/src/components/streamer/ScreenCapture.jsx).
+
+**Backend rendition ladder for WHIP** — because the WHIP fork hands SRS
+a single SDP-negotiated resolution, the backend supplements the bare
+source with a supervised ffmpeg ladder defined in
+[`backend/src/transcode.rs`](../backend/src/transcode.rs):
+
+| Rendition | Resolution | Video bitrate | Audio bitrate |
+|-----------|------------|---------------|---------------|
+| Source    | as published | passthrough (SRS-native HLS) | as published |
+| `_720p`   | 1280×720   | 2000 kbps     | 96 kbps       |
+| `_360p`   | 640×360    | 600 kbps      | 64 kbps       |
+
+When SRS calls `on_publish` for a non-rendition stream key, the backend
+spawns the ladder (1.5 s grace so the `rtc_to_rtmp` bridge has time to
+start producing RTMP), and tears it down on `on_publish_done`.
+`tokio::process::Child::kill_on_drop(true)` ensures the encoders are
+reaped if the supervisor task is aborted.
+
+**Offline debounce.** SRS occasionally fires `on_publish_done` for
+transient internal renegotiations — a viewer joining or leaving via
+WHEP can churn the `rtc_to_rtmp` bridge, briefly tearing down the
+RTMP source even though the publisher is still live. To avoid flipping
+the stream offline (and surfacing "stream ended" to the streamer)
+every time this happens, `on_publish_done` schedules a **3 s debounced
+offline transition**. If a fresh `on_publish` lands inside that
+window, the pending task is cancelled (`JoinHandle::abort`) and the
+stream stays live from the user's perspective. The pending tasks are
+tracked in an `Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>` injected as
+an Axum `Extension` (see `OfflineDebouncer` in
+[`backend/src/routes/internal.rs`](../backend/src/routes/internal.rs)).
 
 ## Container Layout
 
@@ -265,7 +327,7 @@ sequenceDiagram
         QUIC->>ffmpeg: stdin write
     end
 
-    ffmpeg->>SRS: RTMP push × 3 renditions<br/>(<key>, <key>_480p, <key>_360p)
+    ffmpeg->>SRS: RTMP push × N renditions<br/>(<key>, <key>_1080p, <key>_720p, <key>_360p)
     SRS->>REST: on_publish callback (per rendition)
     REST-->>SRS: 200 OK / 0 (accept)
     SRS->>SRS: write HLS to /tmp/hls/hls/<key>/
@@ -307,6 +369,12 @@ OBS is the recommended publish path for Firefox and Safari users since
 neither browser ships WebTransport with `serverCertificateHashes`
 enabled by default.
 
+Note that the `on_publish_done` handler does **not** flip the stream
+offline immediately — it schedules a 3 s debounced transition (see
+*Offline debounce* above) so a transient SRS renegotiation (e.g. a WHEP
+viewer churning the `rtc_to_rtmp` bridge) doesn't end the stream from
+the user's perspective.
+
 ### Viewer: watch a stream
 
 ```mermaid
@@ -325,7 +393,7 @@ sequenceDiagram
     V->>Router: GET /router-api/route/:stream_key
     Router-->>V: { edge_url, edge_id }
 
-    Note over V: Try WHEP first (≤ 3.5 s timeout)
+    Note over V: Try WHEP first (≤ 1.5 s first-frame timeout)
     V->>SRS: POST /whep/?app=live&stream=<key><br/>SDP offer
     SRS-->>V: SDP answer
     SRS-->>V: WebRTC media (UDP :8200)
@@ -349,8 +417,14 @@ hands out:
 |-------------------------|------------------------------------------|--------------------------------------|
 | Playlist                | `/tmp/hls/hls/<key>/index.m3u8`          | `/hls/<key>/index.m3u8`              |
 | Segments                | `/tmp/hls/hls/<key>/<seq>.ts`            | `/hls/<key>/<seq>.ts`                |
-| 480p rendition playlist | `/tmp/hls/hls/<key>_480p/index.m3u8`     | `/hls/<key>_480p/index.m3u8`         |
-| 360p rendition playlist | `/tmp/hls/hls/<key>_360p/index.m3u8`     | `/hls/<key>_360p/index.m3u8`         |
+| 1080p rendition (WT)    | `/tmp/hls/hls/<key>_1080p/index.m3u8`    | `/hls/<key>_1080p/index.m3u8`        |
+| 720p rendition          | `/tmp/hls/hls/<key>_720p/index.m3u8`     | `/hls/<key>_720p/index.m3u8`         |
+| 360p rendition          | `/tmp/hls/hls/<key>_360p/index.m3u8`     | `/hls/<key>_360p/index.m3u8`         |
+
+The `_1080p` rendition is only emitted by the WebTransport ingest path
+(it uses `-c:v copy` passthrough on H.264/MP4 sources). The WHIP ladder
+in `transcode.rs` produces only `_720p` and `_360p`, with the bare
+`<key>` playlist serving as the Source tier from SRS-native HLS.
 
 The edge container mounts the same `hls_segments` Docker volume
 **read-only** so it can serve segments directly without an extra HTTP
@@ -359,18 +433,41 @@ the edge for global fan-out; the URL shape is identical.
 
 ## Encoding Ladder
 
-The backend's ffmpeg pipeline forks the decoded video stream once and
-fans out to three RTMP outputs:
+The encoding ladder differs slightly between the two browser-publish
+paths, but converges on the same set of HLS playlist URLs:
 
-| Rendition | Resolution         | Video bitrate | Audio bitrate |
-|-----------|--------------------|---------------|---------------|
-| source    | input native       | input native  | 128 kbps      |
-| 480p      | scale fit 854×480  | 1000 kbps     | 96 kbps       |
-| 360p      | scale fit 640×360  | 600 kbps      | 64 kbps       |
+### WebTransport path (`backend/src/quic.rs`, `RENDITIONS`)
+
+A single decode pass feeds `-filter_complex split=N` into N encoders
+running inside the same ffmpeg process the QUIC server pipes the
+browser bitstream into.
+
+| Rendition | Resolution        | Video bitrate              | Audio bitrate |
+|-----------|-------------------|----------------------------|---------------|
+| `_1080p`  | up to 1920×1080   | passthrough on H.264/MP4, else 4000 kbps | 128 kbps |
+| `_720p`   | up to 1280×720    | 2000 kbps                  | 96 kbps       |
+| `_360p`   | up to 640×360     | 600 kbps                   | 64 kbps       |
+
+Scale uses `force_original_aspect_ratio=decrease`, so a smaller source
+passes through at its native size rather than upscaling.
+
+### WHIP path (`backend/src/transcode.rs`, `WHIP_LADDER`)
+
+The WHIP source already exists as RTMP inside SRS (via the
+`rtc_to_rtmp` bridge), so the bare `<key>` HLS playlist serves as the
+Source tier without a re-encode. A separate supervised ffmpeg pulls
+the RTMP source and pushes the lower tiers back to SRS:
+
+| Rendition | Resolution | Video bitrate | Audio bitrate |
+|-----------|------------|---------------|---------------|
+| Source    | as published | passthrough | as published  |
+| `_720p`   | 1280×720   | 2000 kbps     | 96 kbps       |
+| `_360p`   | 640×360    | 600 kbps      | 64 kbps       |
 
 The viewer's "Quality" dropdown selects a rendition by appending the
-suffix (`_480p`, `_360p`) to the stream key for both WHEP and HLS URLs.
-There is no automatic ABR — the user picks.
+suffix (`_720p`, `_360p`) to the stream key for both WHEP and HLS
+URLs; the `source` option uses the unsuffixed key. There is no
+automatic ABR — the user picks.
 
 ## Routing Precedence
 
@@ -394,6 +491,23 @@ viewer.
   deployment ships with a working admin account.
 - Regular users can request the `streamer` role through the
   `role_applications` table; admins approve / deny from `/admin`.
+
+## Operational Diagnostics
+
+A few backend log lines exist specifically to make common deployment
+failure modes obvious without grepping through SRS logs:
+
+| Startup line                                                  | Meaning                                                              |
+|---------------------------------------------------------------|----------------------------------------------------------------------|
+| `WebRTC candidate configured candidate=<host>`                | `CANDIDATE` env is set to a routable host — WHIP/WHEP can work.      |
+| `CANDIDATE is unset or loopback ...`                          | `CANDIDATE` is empty / `127.0.0.1` / `localhost`. WebRTC will fail for any non-localhost client. Set `CANDIDATE=<public IP>` in `.env` and open UDP 8000. |
+| `Scheduled debounced offline transition`                      | `on_publish_done` arrived; offline flip is queued behind a 3 s timer. |
+| `Marked stream offline (debounced)`                           | The 3 s timer expired with no re-publish; stream is now offline.     |
+| `Spawned WHIP rendition ladder ...`                           | Backend ffmpeg rendition ladder for a WHIP source has started.       |
+
+See [`docs/DEPLOY.md`](./DEPLOY.md) for the full EC2 / S3 / CloudFront
+checklist, including the security-group rules that have to be in place
+for `CANDIDATE` to actually work.
 
 ## Technology Stack
 

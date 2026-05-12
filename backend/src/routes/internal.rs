@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -7,11 +11,41 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::errors::AppError;
 use crate::models::{stream, user};
 use crate::transcode::{self, LadderRegistry};
+
+/// How long to wait after `on_publish_done` before actually flipping the
+/// stream offline. SRS occasionally fires `on_unpublish` for transient
+/// internal renegotiations (a viewer joining/leaving via WHEP can churn
+/// the `rtc_to_rtmp` bridge). If a fresh `on_publish` arrives during
+/// this window, the pending offline is cancelled and the stream stays
+/// live from the user's perspective.
+const OFFLINE_DEBOUNCE: Duration = Duration::from_secs(3);
+
+/// Tracks pending offline tasks per source stream id so a re-publish
+/// inside the debounce window can cancel the offline transition.
+pub type OfflineDebouncer = Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>;
+
+/// Build a fresh, empty debouncer. Call once at startup and inject as an
+/// Axum `Extension` alongside the ladder registry.
+pub fn new_debouncer() -> OfflineDebouncer {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Cancel any pending offline transition for `stream_id`. Used by
+/// `on_publish` to defeat a racing `on_publish_done` that fired moments
+/// before the publisher reconnected.
+async fn cancel_pending_offline(debouncer: &OfflineDebouncer, stream_id: Uuid) {
+    if let Some(handle) = debouncer.lock().await.remove(&stream_id) {
+        handle.abort();
+    }
+}
 
 /// Builds the /api/internal/rtmp/* router.
 pub fn router() -> Router<(PgPool, Config)> {
@@ -63,6 +97,7 @@ fn extract_callback(
 async fn on_publish(
     State((pool, config)): State<(PgPool, Config)>,
     Extension(ladder): Extension<LadderRegistry>,
+    Extension(debouncer): Extension<OfflineDebouncer>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
@@ -92,6 +127,10 @@ async fn on_publish(
 
             //Source publish only
             if !is_rendition {
+                //Defeat any pending offline transition from a recent
+                //`on_publish_done` (transient SRS renegotiation, viewer
+                //refresh churning the rtc_to_rtmp bridge, etc).
+                cancel_pending_offline(&debouncer, s.id).await;
                 stream::set_live(&pool, s.id).await?;
                 //Spin up the rendition ladder. The WebTransport ingest path
                 //already produces its own renditions inline; this branch
@@ -120,10 +159,16 @@ async fn on_publish(
 }
 
 /// `POST /api/internal/rtmp/on_publish_done`  handle a publisher disconnect.
-/// Flips the stream offline so it falls off the home page.
+/// Schedules a debounced offline transition so a transient SRS
+/// renegotiation (e.g. a viewer refreshing WHEP and churning the
+/// `rtc_to_rtmp` bridge) doesn't immediately end the stream from the
+/// user's perspective. If a fresh `on_publish` lands inside the
+/// debounce window the pending task is cancelled and the stream stays
+/// live.
 async fn on_publish_done(
     State((pool, _config)): State<(PgPool, Config)>,
     Extension(ladder): Extension<LadderRegistry>,
+    Extension(debouncer): Extension<OfflineDebouncer>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
@@ -136,13 +181,46 @@ async fn on_publish_done(
         return Ok((StatusCode::OK, "0").into_response());
     }
 
-    if let Some(s) = stream::find_by_stream_key(&pool, base_key).await? {
-        stream::set_offline(&pool, s.id).await?;
-        //Tear down the WHIP rendition ladder (no-op for WebTransport
-        //sources since they were never registered).
-        transcode::stop_ladder(&ladder, s.id).await;
-        tracing::info!(stream_key = %stream_key, "Marked stream offline");
-    }
+    let Some(s) = stream::find_by_stream_key(&pool, base_key).await? else {
+        return Ok((StatusCode::OK, "0").into_response());
+    };
+
+    //Replace any prior pending offline so the timer is always reset to
+    //the most recent `on_publish_done`.
+    cancel_pending_offline(&debouncer, s.id).await;
+
+    let pool_clone = pool.clone();
+    let ladder_clone = ladder.clone();
+    let debouncer_clone = debouncer.clone();
+    let stream_id = s.id;
+    let stream_key_log = stream_key.clone();
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(OFFLINE_DEBOUNCE).await;
+        match stream::set_offline(&pool_clone, stream_id).await {
+            Ok(_) => {
+                transcode::stop_ladder(&ladder_clone, stream_id).await;
+                tracing::info!(
+                    stream_key = %stream_key_log,
+                    "Marked stream offline (debounced)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    stream_key = %stream_key_log,
+                    error = %e,
+                    "Failed to mark stream offline after debounce"
+                );
+            }
+        }
+        debouncer_clone.lock().await.remove(&stream_id);
+    });
+
+    debouncer.lock().await.insert(stream_id, handle);
+    tracing::info!(
+        stream_key = %stream_key,
+        "Scheduled debounced offline transition"
+    );
 
     Ok((StatusCode::OK, "0").into_response())
 }

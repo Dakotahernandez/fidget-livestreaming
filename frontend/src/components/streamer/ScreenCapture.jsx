@@ -531,13 +531,21 @@ function ScreenCapture({ streamId, streamKey }) {
         console.log('[stream] WHIP publish established');
 
         const pc = session.peerConnection;
+        // `disconnected` is a transient state in the WebRTC lifecycle
+        // (RFC 8829 / W3C WebRTC) — ICE may recover within a few
+        // seconds (e.g. when a viewer refreshing WHEP momentarily
+        // perturbs SRS's rtc_to_rtmp bridge). Only treat `failed` or
+        // `closed` as terminal so a flapping connection doesn't end
+        // the broadcast from the streamer's perspective.
         const onStateChange = () => {
           const state = pc.connectionState;
-          if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+          if (state === 'failed' || state === 'closed') {
             console.warn(`[stream] WHIP peer connection ${state}`);
             whipSessionRef.current = null;
             setIsStreaming(false);
             pc.removeEventListener('connectionstatechange', onStateChange);
+          } else if (state === 'disconnected') {
+            console.warn('[stream] WHIP peer connection disconnected (transient — waiting for ICE recovery)');
           }
         };
         pc.addEventListener('connectionstatechange', onStateChange);

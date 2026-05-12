@@ -126,8 +126,8 @@
   - Adjust segment duration and playlist size for acceptable latency
   - Document observed latency numbers
 - [ ] **Cloud provider setup** -- *Start early, this is the hardest part* <---chandler
-  - Pick provider (Oracle Cloud Free Tier or DigitalOcean)
-  - Create account, claim student credits
+  - Provider chosen: **AWS** (EC2 for compute, S3 for HLS origin, CloudFront for CDN)
+  - Create AWS account, claim student credits
   - Provision a VM / instance (Ubuntu, 2+ vCPU, 4+ GB RAM)
   - Install Docker & Docker Compose on the VM
   - Open firewall ports: 22 (SSH), 80, 443, 1935 (RTMP), 3000, 8080, 8088
@@ -322,10 +322,7 @@
 | **Azure for Students** | $100 student credits | No credit card needed | Portal can be confusing; decent VM options |
 | **Railway / Fly.io** | Small free tiers | Quick demos, easy Docker deploy | May not have enough resources for RTMP + HLS |
 
-**Recommended path:**
-1. **Oracle Cloud free tier** gives the most compute at $0 — permanently free ARM instances
-2. **DigitalOcean** via GitHub Student Developer Pack ($200 credits, easiest experience)
-3. Team to evaluate both and decide by Sprint 2
+**Chosen path:** **AWS** — EC2 hosts the Docker Compose stack, S3 holds HLS segments, CloudFront fronts S3 as the public CDN. The router service is wired to advertise CloudFront URLs via `CLOUDFRONT_DOMAIN` / `EDGE_SERVERS`.
 
 ---
 

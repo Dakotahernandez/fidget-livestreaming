@@ -4,22 +4,32 @@ Goal: Apply the knowledge you've learned in new ways.
 # Project description
 This is an open-ended project. Students can extend their BearTV project or do something new from the ground up. Project ideas must be approved by Dr. Freeman.
 
-## Current project state (April 21, 2026)
+## Current project state
 
 Our project (Fidget: one-to-many live streaming with CDN-style delivery) is currently in an implementation-complete state for the core app path and partially complete for CDN hardening.
 
 Completed:
 - Dockerized multi-service local stack (frontend, backend, database, media server, edge, router)
 - Backend auth + stream APIs in Rust/Axum
-- QUIC ingest path (browser -> backend QUIC -> ffmpeg -> RTMP/HLS pipeline)
-- Frontend pages for auth, dashboard, and watch playback
-- Router baseline with GeoIP-aware nearest-edge selection + fallback
+- WebTransport (QUIC) ingest path: browser -> backend QUIC -> ffmpeg fan-out -> RTMP/HLS pipeline (source / 1080p / 720p / 360p)
+- WHIP browser ingest path: browser -> SRS WHIP -> `rtc_to_rtmp` bridge -> backend `on_publish` -> supervised ffmpeg rendition ladder (`backend/src/transcode.rs`) producing 720p / 360p
+- Build-time `VITE_DISABLE_WEBTRANSPORT=1` switch forces WHIP-only ingest for CDN deployments that can't carry UDP/4443
+- Stream-key validation in SRS `on_publish` / `on_publish_done` callbacks (with role check)
+- WHEP playback (≤1.5 s first-frame timeout) with HLS fallback, multi-rendition quality selector (Source / 720p / 360p)
+- Resilient publish lifecycle: 3 s debounce on SRS `on_publish_done` plus transient-aware ICE handling on the publisher so brief WebRTC hiccups don't end the broadcast
+- Frontend pages for auth, dashboard, watch, and admin
+- Router with GeoIP-aware nearest-edge selection + CloudFront / local fallbacks
+- Edge nginx serving `/hls/<key>/...` from a read-only shared volume
 
 In progress / remaining:
-- Stream-key validation hooks in media server `on_publish` flow
-- Edge server HLS proxy/cache behavior
-- Monitoring dashboards and finalized testing documentation
-- Final cloud provider selection and full multi-region deployment validation
+- Multi-region deployment validation (CloudFront + multiple edge nginx instances)
+- Low-latency HLS / hardware-accelerated encoders for tighter glass-to-glass latency
+- Automated load testing beyond `scripts/simulate_viewers.sh`
+
+Deployment target:
+- **AWS EC2** instance hosts the full Docker Compose stack (backend, media-server, frontend, db, edge, router)
+- **AWS S3** bucket serves as the HLS origin (`/hls/<key>/index.m3u8` + `.ts` segments)
+- **AWS CloudFront** fronts the S3 origin for global, cached HLS delivery; the router still selects CloudFront via `CLOUDFRONT_DOMAIN` / `EDGE_SERVERS`
 
 Detailed technical status and architecture notes are maintained in `TEAMREADME.md` and `docs/`.
 

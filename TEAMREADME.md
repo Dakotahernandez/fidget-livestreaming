@@ -19,7 +19,7 @@ One-to-many live streaming video (like Twitch), tested with users in different l
 - **Edge / CDN:** nginx (shared read-only HLS volume), opt-in CloudFront
 - **Routing:** Rust + MaxMind GeoLite2
 - **Infrastructure:** Docker Compose (with optional `turn` profile for coturn)
-- **Cloud:** Oracle Cloud Free Tier or DigitalOcean (via GitHub Student Pack)
+- **Cloud:** AWS — EC2 (compute, runs the full Docker Compose stack), S3 (HLS segment origin), CloudFront (CDN in front of S3)
 
 ## Current State
 
@@ -31,13 +31,15 @@ One-to-many live streaming video (like Twitch), tested with users in different l
 | QUIC / WebTransport ingest | Implemented | Single ordered unidirectional stream; container auto-detect (WebM EBML / fMP4 ftyp). |
 | Cert rotation | Implemented | Self-signed QUIC identity rotates every 10 days; cert hash served from a shared `Arc<RwLock<String>>`. |
 | OBS / RTMP ingest | Implemented | SRS `on_publish` hook calls back to backend for stream-key validation. |
-| Multi-rendition encoding | Implemented | ffmpeg `-filter_complex split=N` fans out to source / 480p / 360p RTMP outputs. |
-| WHEP playback | Implemented | Frontend tries WHEP for ~3.5 s, falls back to HLS via `hls.js` / Safari native. |
+| Multi-rendition encoding (WebTransport) | Implemented | ffmpeg `-filter_complex split=N` fans out to source / 1080p (passthrough on H.264) / 720p / 360p RTMP outputs. |
+| Multi-rendition encoding (WHIP) | Implemented | Backend `transcode.rs` spawns a supervised ffmpeg ladder on SRS `on_publish`; pulls bridged RTMP source and pushes 720p / 360p. Bare key serves as Source. |
+| WHEP playback | Implemented | Frontend tries WHEP for ~1.5 s first-frame, falls back to HLS via `hls.js` / Safari native. Short timeout keeps blocked-UDP deployments from staring at a black player. |
+| Resilient publish lifecycle | Implemented | Backend `on_publish_done` is debounced 3 s so transient SRS renegotiations (e.g. WHEP viewers churning the `rtc_to_rtmp` bridge) don't end the stream; streamer-side `RTCPeerConnection` only treats `failed`/`closed` as terminal (`disconnected` is transient per W3C WebRTC). |
 | Real-time chat | Implemented | Carried over the same WebTransport endpoint as ingest; REST history under `/api/chat/`. |
 | Edge HLS delivery | Implemented | Edge nginx mounts the `hls_segments` volume read-only; serves `/hls/<key>/index.m3u8`. |
 | Geo router | Implemented | `EDGE_SERVERS` parsed list → `CLOUDFRONT_DOMAIN` → `http://edge:8090` fallback. |
 | Monitoring + testing docs | Implemented | See [docs/testing.md](docs/testing.md) and `monitoring/` Prometheus + Grafana dashboards. |
-| Cloud deployment | In progress | Dockerized stack is production-shaped; provider selection / multi-region rollout still being finalised. |
+| Cloud deployment | In progress | Stack runs on a single **AWS EC2** instance via `docker compose`; **S3** holds HLS segments and **CloudFront** fronts S3 as the public CDN. Multi-region rollout still being finalised. |
 
 ### Immediate Next Priorities
 
@@ -65,14 +67,17 @@ Edge servers are configured via the `EDGE_SERVERS` environment variable in the f
 
 ## Cloud Deployment
 
-We're choosing between two providers:
+The production deployment runs on **AWS**:
 
-| Provider | Credits | Pros | Cons |
-|----------|---------|------|------|
-| **Oracle Cloud Free Tier** | Always free (4 OCPU, 24 GB RAM ARM) | Most compute for $0, never expires | Less documentation, UI can be clunky |
-| **DigitalOcean** | $200 via GitHub Student Developer Pack | Easiest setup, great docs, simple UI | Credits expire, less free compute |
+| AWS service | Role |
+|-------------|------|
+| **EC2** | Single instance hosts the full Docker Compose stack (backend, media-server / SRS, frontend nginx, Postgres, edge nginx, router). Public ingress for RTMP `:1935`, WebRTC media `:8000/udp`, and HTTPS to the frontend. |
+| **S3** | HLS segment origin. The bucket holds `/<key>/index.m3u8` and the rolling `.ts` segments for every active rendition (Source / 720p / 360p). |
+| **CloudFront** | CDN in front of the S3 origin. Configured via `CLOUDFRONT_DOMAIN` in `.env`; the router hands viewers a CloudFront URL when `EDGE_SERVERS` / `CLOUDFRONT_DOMAIN` is set, falling back to the in-cluster edge nginx for local dev. |
 
-**Decision:** In progress — team is evaluating both and will finalize provider selection before full multi-region deployment.
+For local dev the EC2/S3/CloudFront layer is bypassed — the edge nginx container serves HLS from the shared `hls_segments` Docker volume directly.
+
+**Open work:** multi-region edge rollout (multiple EC2 + CloudFront origin groups) and an automated S3 sync sidecar so HLS upload is part of the media pipeline rather than a manual step.
 
 ## Setup
 
@@ -135,10 +140,11 @@ The Vite dev server runs at **http://localhost:5173** and proxies API requests t
 
 ### How the live feed is transmitted
 
-Two ingest paths coexist, depending on what the streamer's browser supports:
+Three ingest paths coexist, depending on what the streamer's browser supports and the deployment topology:
 
-- **Chrome / Edge:** the browser opens a **WebTransport (QUIC)** session to the Rust backend and writes WebM or fMP4 onto a single ordered unidirectional stream.
-- **Firefox / Safari / dedicated software:** the streamer points OBS (or any RTMP encoder) directly at the SRS media server.
+- **Chromium browsers (Chrome / Edge / Brave / Opera / Arc / Vivaldi):** the browser opens a **WebTransport (QUIC)** session to the Rust backend and writes WebM or fMP4 onto a single ordered unidirectional stream.
+- **Firefox / Safari (and any deployment behind a UDP-blocking CDN):** the browser publishes via **WHIP** (WebRTC-HTTP Ingestion Protocol). SRS terminates the offer, bridges the WebRTC publish into RTMP (`rtc_to_rtmp on` in `srs.conf`), and the backend's `on_publish` callback spawns the `transcode.rs` rendition ladder. The build-time `VITE_DISABLE_WEBTRANSPORT=1` arg in `docker-compose.yml` forces every browser onto this path — useful when the WebTransport UDP/4443 ingest can't be reached from the public internet.
+- **Dedicated software (OBS / ffmpeg):** RTMP push directly to SRS; same `on_publish` hook → same ladder.
 
 #### Why QUIC / WebTransport for browser ingest
 
@@ -190,7 +196,8 @@ Live" automatically pins the new cert.
                                                                                                                             │  RTMP, HLS, WHEP
   OBS / ffmpeg push  ────────────────────────────  RTMP  ──────────────────────────────────────────────────────────────────►│
                                                                                                                             ▼
-                                          HLS shared volume ─► edge nginx ─► CloudFront (opt-in) ─► HLS viewers (hls.js / Safari)
+                                          HLS shared volume ─► edge nginx ─► S3 (prod origin) ─► CloudFront ─► HLS viewers (hls.js / Safari)
+                                          (on EC2)            (local dev)
                                                                                                   ╲
                                                                                                    ─► WHEP viewers (WebRTC, UDP :8200)
 ```
@@ -201,21 +208,24 @@ Live" automatically pins the new cert.
 
 3. **Backend QUIC server.** `wtransport` accepts the session, validates the JWT, peeks the first ≤ 64 KB of the stream to detect WebM (EBML magic) vs fMP4 (`ftyp` box), and pipes everything into ffmpeg's stdin. The self-signed identity is rotated every 10 days and the new SHA-256 hash is published into a shared `Arc<RwLock<String>>` for subsequent cert-hash lookups.
 
-4. **ffmpeg fan-out.** A single decode pass feeds `-filter_complex split=N` into N encoders that push to RTMP at `<key>`, `<key>_480p`, `<key>_360p`. fMP4 source can `-c:v copy` straight through.
+4. **ffmpeg fan-out (WebTransport path).** A single decode pass feeds `-filter_complex split=N` into N encoders that push to RTMP at `<key>`, `<key>_1080p`, `<key>_720p`, `<key>_360p`. The `_1080p` rendition uses `-c:v copy` for H.264/MP4 sources to preserve original quality.
+
+4b. **WHIP rendition ladder (`backend/src/transcode.rs`).** When SRS bridges a WHIP publish into RTMP, `on_publish` fires for the bare `<key>`. The backend spawns a supervised ffmpeg that pulls `rtmp://media-server:1935/live/<key>` and pushes `<key>_720p` and `<key>_360p` back. The bare `<key>` HLS that SRS already writes acts as the Source tier, so no extra encode pass is needed for it. The supervisor uses `kill_on_drop(true)` and a 1.5 s grace before the first attempt (gives `rtc_to_rtmp` time to start producing RTMP).
 
 5. **SRS 5.** Receives RTMP, writes HLS to `/tmp/hls/hls/<key>/` (300 s window, 0.5 s fragments), and bridges RTMP → WebRTC for WHEP playback over UDP :8200.
 
-6. **Delivery.** Edge nginx mounts the `hls_segments` Docker volume read-only and serves `/hls/<key>/index.m3u8`. In production CloudFront fronts the edge (URL shape unchanged). The frontend nginx in this repo also reverse-proxies `/whep/` to SRS so WHEP signalling is same-origin.
+6. **Delivery.** Edge nginx mounts the `hls_segments` Docker volume read-only and serves `/hls/<key>/index.m3u8` for local dev. In production the stack runs on a single **AWS EC2** instance, HLS segments are pushed to an **S3** bucket, and **CloudFront** fronts S3 as the public CDN (URL shape unchanged for the player). The frontend nginx in this repo also reverse-proxies `/whep/` to SRS so WHEP signalling is same-origin.
 
-7. **Viewer.** Tries WHEP for ~3.5 s; on timeout / failure falls back to HLS via `hls.js` (Chrome / Firefox / Edge) or native HLS (Safari).
+7. **Viewer.** Tries WHEP for ~1.5 s first-frame; on timeout / failure falls back to HLS via `hls.js` (Chrome / Firefox / Edge) or native HLS (Safari). The short timeout means a deployment with UDP 8000 blocked (e.g. EC2 security group misconfigured) drops to HLS within ~2 s instead of leaving viewers on a black player.
 
 ### Encoding details
 
 | Stage | Codec | Container / Transport | Notes |
 |-------|-------|------------------------|-------|
 | Browser → Backend | VP8 + Opus *or* H.264 + AAC | WebM or fMP4 over a QUIC unidirectional stream | Container auto-detected from the stream prefix; no fragmentation header. |
-| Backend → SRS | H.264 + AAC | RTMP / FLV | ffmpeg `filter_complex split=N` fans out to source / 480p / 360p; fMP4 source can `-c:v copy`. |
-| SRS → HLS viewers | H.264 + AAC | HLS (.m3u8 + .ts), 0.5 s fragments, 300 s window | One playlist per rendition under `/hls/<key>[_480p\|_360p]/`. |
+| Backend → SRS (WebTransport ingest) | H.264 + AAC | RTMP / FLV | ffmpeg `filter_complex split=N` fans out to source / 1080p / 720p / 360p; H.264/MP4 1080p uses `-c:v copy`. |
+| Backend → SRS (WHIP ladder) | H.264 + AAC | RTMP / FLV | `transcode.rs` pulls SRS-bridged RTMP source and pushes 720p / 360p back; bare key serves as Source. |
+| SRS → HLS viewers | H.264 + AAC | HLS (.m3u8 + .ts), 0.5 s fragments, 300 s window | One playlist per rendition under `/hls/<key>[_1080p\|_720p\|_360p]/`. |
 | SRS → WHEP viewers | H.264 + Opus | WebRTC (DTLS-SRTP) over UDP :8200 | Same RTMP source bridged into the WebRTC pipeline. |
 
 ### ffmpeg flags (per rendition)
@@ -225,18 +235,19 @@ Live" automatically pins the new cert.
 | `-preset veryfast` | Fast encoding to minimize latency |
 | `-tune zerolatency` | Disables encoder look-ahead buffering |
 | `-g 60` | Keyframe every 60 frames (2 s at 30 fps) for seek-friendly segments |
-| `-b:v {1000k\|600k}` | Per-rendition video bitrate (480p / 360p) |
+| `-b:v {2000k\|600k}` | Per-rendition video bitrate (720p / 360p) |
 | `-b:a {128k\|96k\|64k}` | Per-rendition AAC audio bitrate |
 
 ### Browser support
 
-| Capability                    | Chrome / Edge | Firefox          | Safari          |
-|-------------------------------|---------------|------------------|-----------------|
-| Browser publish (WebTransport)| Yes           | No (pref-gated)  | No              |
-| OBS / RTMP publish            | Yes           | Yes              | Yes             |
-| WHEP playback                 | Yes           | Yes              | Yes             |
-| HLS playback                  | Yes           | Yes              | Yes (native)    |
-| Chat (WebTransport)           | Yes           | No (pref-gated)  | No              |
+| Capability                       | Chrome / Edge | Firefox          | Safari          |
+|----------------------------------|---------------|------------------|-----------------|
+| Browser publish (WebTransport)   | Yes           | No (pref-gated)  | No              |
+| Browser publish (WHIP fallback)  | Yes           | Yes              | Yes             |
+| OBS / RTMP publish               | Yes           | Yes              | Yes             |
+| WHEP playback                    | Yes           | Yes              | Yes             |
+| HLS playback                     | Yes           | Yes              | Yes (native)    |
+| Chat (WebTransport)              | Yes           | No (pref-gated)  | No              |
 
 ### Future encoding plans
 

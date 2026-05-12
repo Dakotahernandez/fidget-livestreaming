@@ -13,7 +13,10 @@ COPY src/ src/
 # Cap cargo's encoder/codegen parallelism on memory-constrained CI
 # runners (defaults to one job per CPU, which OOMs the self-hosted
 # runner). Override at build time with --build-arg CARGO_BUILD_JOBS=N.
-ARG CARGO_BUILD_JOBS=""
+# `default` is the literal cargo accepts to mean "one job per CPU";
+# leaving the ARG empty would set CARGO_BUILD_JOBS="" which cargo
+# rejects with "Number of parallel jobs should be `default` or a number".
+ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 ENV SQLX_OFFLINE=true
