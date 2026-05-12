@@ -25,9 +25,31 @@ const STREAM_READ_BUF: usize = 64 * 1024;
 const CERT_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24 * 10);
 
 /// Build a fresh self-signed identity for the WebTransport endpoint.
+///
+/// The SAN list always includes the loopback names so local docker-compose
+/// keeps working, and additionally includes whatever hostname the deployment
+/// is reachable at via the `PUBLIC_HOSTNAME` env var (e.g. `fidgetlive.com`).
+/// Recent Chrome builds (120+) tightened the rules around
+/// `serverCertificateHashes` and will reject the WebTransport handshake with
+/// a generic "rejected" if the cert's SAN list doesn't cover the hostname
+/// the browser dialled, even though the hash itself matches. Including the
+/// public hostname here costs nothing in dev and unblocks browser ingest in
+/// production.
 fn build_identity() -> Identity {
-    Identity::self_signed(["localhost", "127.0.0.1", "::1"])
-        .expect("failed to create self-signed identity")
+    let mut sans: Vec<String> = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+
+    if let Ok(host) = std::env::var("PUBLIC_HOSTNAME") {
+        let host = host.trim();
+        if !host.is_empty() && !sans.iter().any(|s| s == host) {
+            sans.push(host.to_string());
+        }
+    }
+
+    Identity::self_signed(sans).expect("failed to create self-signed identity")
 }
 
 /// Compute the hex-encoded SHA-256 hash of the leaf certificate so the
@@ -55,8 +77,12 @@ pub fn start_quic_server(
     let initial_hash = cert_hash_hex(&initial_identity);
     let cert_hash = Arc::new(RwLock::new(initial_hash.clone()));
 
+    let public_host =
+        std::env::var("PUBLIC_HOSTNAME").unwrap_or_else(|_| "<unset>".to_string());
     tracing::info!(
-        "QUIC ingest server starting on UDP port {port} (cert hash: {initial_hash})"
+        "QUIC ingest server starting on UDP port {port} \
+         (cert hash: {initial_hash}, PUBLIC_HOSTNAME: {public_host}). \
+         Browsers must reach UDP/{port} on this host for WebTransport ingest."
     );
 
     //3s keep-alive pings stop NATs and CGNAT firewalls from idling the QUIC connection.

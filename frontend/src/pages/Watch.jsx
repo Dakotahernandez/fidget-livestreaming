@@ -5,18 +5,17 @@ import { getStream, joinStream, resolvePlaybackRoute } from '../services/api';
 import StreamChat from '../components/chat/StreamChat';
 
 // Manual quality selection ladder. Values match the rendition suffixes
-// the backend's ffmpeg pushes to SRS (see backend/src/quic.rs RENDITIONS).
-// All entries are downscaled renditions — there is no untouched-source
-// passthrough. The 1080p rendition uses
-// `force_original_aspect_ratio=decrease` server-side, so a sub-1080p
-// source still plays at its native size rather than being upscaled.
+// the backend's ffmpeg pushes to SRS. The 'source' value selects the
+// untouched publish (no suffix on the HLS URL); other values map to
+// `<streamKey>_<value>`. The set is intentionally small — WHIP-sourced
+// streams negotiate a single SDP resolution that becomes "Source", so
+// offering a separate 1080p tier above it would be wasteful upscaling.
 const QUALITY_OPTIONS = [
-  { value: '1080p', label: '1080p' },
-  { value: '720p',  label: '720p' },
-  { value: '360p',  label: '360p' },
-  {value: '4k',     label: 'OBS stream' },
+  { value: 'source', label: 'Source' },
+  { value: '720p',   label: '720p' },
+  { value: '360p',   label: '360p' },
 ];
-const DEFAULT_QUALITY = '1080p';
+const DEFAULT_QUALITY = 'source';
 
 const EMPTY_PLAYBACK_METRICS = {
   source: '',
@@ -175,20 +174,20 @@ function Watch() {
   // Derived playback identifiers that fold the user's quality choice into
   // the URL/stream-key. The player effect keys on these so changing the
   // dropdown tears down the current WHEP/HLS player and starts a fresh
-  // one against the new rendition.
+  // one against the new rendition. The 'source' tier is the untouched
+  // publish key (no suffix); every other tier appends `_<quality>`.
   const playbackKey = useMemo(
     () => {
       if (!streamKey) return streamKey;
-      return quality === '4k' ? streamKey : `${streamKey}_${quality}`;
+      return quality === 'source' ? streamKey : `${streamKey}_${quality}`;
     },
     [streamKey, quality],
   );
 
   const playbackUrl = useMemo(() => {
     if (!hlsUrl || !streamKey) return hlsUrl;
-
-    const nextKey = quality === '4k' ? streamKey : `${streamKey}_${quality}`;
-
+    if (quality === 'source') return hlsUrl;
+    const nextKey = `${streamKey}_${quality}`;
     // Both origin and edge-routed URLs end in `…/hls/<streamKey>/index.m3u8`,
     // so it's safe to swap just the key segment without re-running the
     // route lookup.

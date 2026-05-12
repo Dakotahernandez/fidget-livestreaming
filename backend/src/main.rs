@@ -6,6 +6,7 @@ mod routes;
 mod middleware;
 mod quic;
 mod quic_chat;
+mod transcode;
 
 use axum::{routing::get, Extension, Json, Router};
 use serde_json::json;
@@ -43,6 +44,10 @@ async fn main() {
     //Shared in-memory chat state. Holds per-stream broadcast channels.
     let chat_state = quic_chat::ChatState::new();
 
+    //Registry of running WHIP rendition-ladder ffmpeg supervisors.
+    //Populated by `on_publish` (source key), drained by `on_publish_done`.
+    let ladder_registry = transcode::new_registry();
+
     //Start the QUIC/WebTransport server. Returns the self-signed cert hash
     //which is served to browsers so they can trust it via serverCertificateHashes.
     let cert_hash = quic::start_quic_server(
@@ -75,6 +80,7 @@ async fn main() {
         .layer(Extension(cfg.jwt_secret.clone()))
         .layer(Extension(cert_hash))
         .layer(Extension(chat_state))
+        .layer(Extension(ladder_registry))
         .layer(cors)
         .with_state(state);
 

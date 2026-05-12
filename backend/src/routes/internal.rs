@@ -3,7 +3,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
-    Router,
+    Extension, Router,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use crate::config::Config;
 use crate::errors::AppError;
 use crate::models::{stream, user};
+use crate::transcode::{self, LadderRegistry};
 
 /// Builds the /api/internal/rtmp/* router.
 pub fn router() -> Router<(PgPool, Config)> {
@@ -60,7 +61,8 @@ fn extract_callback(
 /// `POST /api/internal/rtmp/on_publish` - accept or reject an RTMP publish.
 /// Accepts also flips the stream to live, but only for the source
 async fn on_publish(
-    State((pool, _config)): State<(PgPool, Config)>,
+    State((pool, config)): State<(PgPool, Config)>,
+    Extension(ladder): Extension<LadderRegistry>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
@@ -91,6 +93,17 @@ async fn on_publish(
             //Source publish only
             if !is_rendition {
                 stream::set_live(&pool, s.id).await?;
+                //Spin up the rendition ladder. The WebTransport ingest path
+                //already produces its own renditions inline; this branch
+                //covers WHIP / direct-RTMP source publishes that arrive at
+                //SRS without ever going through `quic.rs`.
+                transcode::start_ladder(
+                    &ladder,
+                    s.id,
+                    config.rtmp_url.clone(),
+                    base_key.to_string(),
+                )
+                .await;
             }
             tracing::info!(
                 stream_key = %stream_key,
@@ -110,6 +123,7 @@ async fn on_publish(
 /// Flips the stream offline so it falls off the home page.
 async fn on_publish_done(
     State((pool, _config)): State<(PgPool, Config)>,
+    Extension(ladder): Extension<LadderRegistry>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
@@ -124,6 +138,9 @@ async fn on_publish_done(
 
     if let Some(s) = stream::find_by_stream_key(&pool, base_key).await? {
         stream::set_offline(&pool, s.id).await?;
+        //Tear down the WHIP rendition ladder (no-op for WebTransport
+        //sources since they were never registered).
+        transcode::stop_ladder(&ladder, s.id).await;
         tracing::info!(stream_key = %stream_key, "Marked stream offline");
     }
 
