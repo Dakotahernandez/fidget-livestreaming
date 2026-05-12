@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
@@ -113,7 +112,7 @@ pub fn parse_chat_path(path: &str) -> Option<(Uuid, String)> {
         .split('&')
         .find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
-            if key == "token" {
+			if key == "chat_token" || key == "token" {
                 Some(value.to_string())
             } else {
                 None

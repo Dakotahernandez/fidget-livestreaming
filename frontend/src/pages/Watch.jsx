@@ -138,6 +138,7 @@ function Watch() {
   const [stream, setStream] = useState(null);
   const [hlsUrl, setHlsUrl] = useState('');
   const [streamKey, setStreamKey] = useState('');
+  const [chatToken, setChatToken] = useState('');
   const [error, setError] = useState('');
   const [playerError, setPlayerError] = useState('');
   const [joinPassword, setJoinPassword] = useState('');
@@ -179,6 +180,7 @@ function Watch() {
       const res = await joinStream(id, password);
       const fallbackUrl = res.data?.hls_url || '';
       const nextStreamKey = res.data?.stream_key || '';
+      const nextChatToken = res.data?.chat_access_token || '';
 
       let nextUrl = fallbackUrl;
       let playbackSource = 'origin';
@@ -204,10 +206,12 @@ function Watch() {
       });
       setStreamKey(nextStreamKey);
       setHlsUrl(nextUrl);
+      setChatToken(nextChatToken);
     } catch (err) {
       const msg = err.response?.data?.error || 'Unable to join this stream.';
       setJoinError(msg);
       setHlsUrl('');
+      setChatToken('');
     } finally {
       setJoining(false);
     }
@@ -452,85 +456,92 @@ function Watch() {
 
   return (
     <div className="page">
-      <div className="watch-container">
-        {error && <p className="error-msg">{error}</p>}
+      <div className="watch-layout">
+        <div className="watch-main">
+          {error && <p className="error-msg">{error}</p>}
 
-        {!error && (
-          <>
-            <div className="video-wrapper">
-              <video ref={videoRef} controls />
-              {stream?.requires_password && !hlsUrl && !error && (
-                <div className="video-placeholder" style={{ padding: '1rem' }}>
-                  <p style={{ marginBottom: '0.5rem' }}>This stream is password protected.</p>
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      unlockStream(joinPassword);
-                    }}
-                    style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}
-                  >
-                    <input
-                      type="password"
-                      value={joinPassword}
-                      onChange={(e) => setJoinPassword(e.target.value)}
-                      placeholder="Enter stream password"
-                      style={{ padding: '0.5rem', minWidth: '220px' }}
-                    />
-                    <button className="btn" type="submit" disabled={joining}>
-                      {joining ? 'Joining...' : 'Join Stream'}
-                    </button>
-                  </form>
-                  {joinError && <p className="error-msg mt-1">{joinError}</p>}
-                </div>
-              )}
-              {playerError && (
-                <div className="video-placeholder">{playerError}</div>
-              )}
-            </div>
-
-            <div className="mt-2">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-                <h2 style={{ margin: 0 }}>
-                  {stream?.is_live && <span className="live-badge">LIVE</span>}{' '}
-                  {stream?.title || 'Loading...'}
-                </h2>
-                {/* Manual quality selection. Changing this restarts the
-                    player against the rendition's HLS playlist / WHEP
-                    endpoint — there's no auto/ABR, the user picks. */}
-                {hlsUrl && (
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
-                    Quality:
-                    <select
-                      value={quality}
-                      onChange={(e) => setQuality(e.target.value)}
-                      style={{ padding: '0.25rem 0.5rem' }}
+          {!error && (
+            <>
+              <div className="video-wrapper">
+                <video ref={videoRef} controls />
+                {stream?.requires_password && !hlsUrl && !error && (
+                  <div className="video-placeholder" style={{ padding: '1rem' }}>
+                    <p style={{ marginBottom: '0.5rem' }}>This stream is password protected.</p>
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        unlockStream(joinPassword);
+                      }}
+                      style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}
                     >
-                      {QUALITY_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </label>
+                      <input
+                        type="password"
+                        value={joinPassword}
+                        onChange={(e) => setJoinPassword(e.target.value)}
+                        placeholder="Enter stream password"
+                        style={{ padding: '0.5rem', minWidth: '220px' }}
+                      />
+                      <button className="btn" type="submit" disabled={joining}>
+                        {joining ? 'Joining...' : 'Join Stream'}
+                      </button>
+                    </form>
+                    {joinError && <p className="error-msg mt-1">{joinError}</p>}
+                  </div>
+                )}
+                {playerError && (
+                  <div className="video-placeholder">{playerError}</div>
                 )}
               </div>
-              <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
-                {stream?.username || (stream ? `User #${stream.user_id}` : '')}
-              </p>
-              <div style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
-                <p>
-                  Source: {playbackMetrics.source || 'pending'}
-                  {playbackMetrics.edgeId ? ` (${playbackMetrics.edgeId})` : ''}
+
+              <div className="mt-2">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                  <h2 style={{ margin: 0 }}>
+                    {stream?.is_live && <span className="live-badge">LIVE</span>}{' '}
+                    {stream?.title || 'Loading...'}
+                  </h2>
+                  {/* Manual quality selection. Changing this restarts the
+                      player against the rendition's HLS playlist / WHEP
+                      endpoint — there's no auto/ABR, the user picks. */}
+                  {hlsUrl && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+                      Quality:
+                      <select
+                        value={quality}
+                        onChange={(e) => setQuality(e.target.value)}
+                        style={{ padding: '0.25rem 0.5rem' }}
+                      >
+                        {QUALITY_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </div>
+                <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
+                  {stream?.username || (stream ? `User #${stream.user_id}` : '')}
                 </p>
-                <p>Route lookup: {metricLabel(playbackMetrics.routeLookupMs)}</p>
-                <p>Manifest load: {metricLabel(playbackMetrics.manifestLoadMs)}</p>
-                <p>First frame: {metricLabel(playbackMetrics.firstFrameMs)}</p>
-                <p>Estimated live latency: {metricLabel(playbackMetrics.liveLatencyMs)}</p>
-                <p>Buffered ahead: {metricLabel(playbackMetrics.bufferMs)}</p>
+                <div style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                  <p>
+                    Source: {playbackMetrics.source || 'pending'}
+                    {playbackMetrics.edgeId ? ` (${playbackMetrics.edgeId})` : ''}
+                  </p>
+                  <p>Route lookup: {metricLabel(playbackMetrics.routeLookupMs)}</p>
+                  <p>Manifest load: {metricLabel(playbackMetrics.manifestLoadMs)}</p>
+                  <p>First frame: {metricLabel(playbackMetrics.firstFrameMs)}</p>
+                  <p>Estimated live latency: {metricLabel(playbackMetrics.liveLatencyMs)}</p>
+                  <p>Buffered ahead: {metricLabel(playbackMetrics.bufferMs)}</p>
+                </div>
               </div>
-            </div>
-          </>
+            </>
+          )}
+        </div>
+
+        {!error && (
+          <aside className="watch-chat-column">
+            <StreamChat streamId={id} chatToken={chatToken} />
+          </aside>
         )}
       </div>
-      <StreamChat streamId={id} />
     </div>
   );
 }

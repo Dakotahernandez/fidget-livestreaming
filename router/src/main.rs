@@ -46,52 +46,67 @@ struct AppState {
     edges: Vec<EdgeServer>,
 }
 
-/// Loads edge server configuration from the `EDGE_SERVERS` environment variable.
+/// Loads edge server configuration in priority order:
 ///
-/// Expected format: `id,url,lat,lon;id,url,lat,lon;...`
-/// Falls back to a single default local edge if the variable is not set.
+/// 1. `EDGE_SERVERS` env var, format `id,url,lat,lon;id,url,lat,lon;...`.
+///    Use this for multi-region deployments where the router does
+///    geo-aware selection.
+/// 2. `CLOUDFRONT_DOMAIN` env var — single edge, location 0/0 (so the
+///    router always selects it).
+/// 3. In-cluster local edge container at `http://edge:8090` — the
+///    sensible default for `docker-compose up` on a developer's box.
 fn load_edges_from_env() -> Vec<EdgeServer> {
-    let raw = std::env::var("CLOUDFRONT_DOMAIN").unwrap_or_else(|_| "https://d1wp4v4rt1bxg5.cloudfront.net".to_string())
-        .trim_end_matches('/').to_string();
+    if let Ok(raw) = std::env::var("EDGE_SERVERS") {
+        let edges: Vec<EdgeServer> = raw
+            .split(';')
+            .filter(|s| !s.trim().is_empty())
+            .filter_map(|entry| {
+                let parts: Vec<&str> = entry.split(',').collect();
+                if parts.len() != 4 {
+                    warn!("Skipping malformed edge entry: {}", entry);
+                    return None;
+                }
+                let lat = parts[2].parse::<f64>().ok()?;
+                let lon = parts[3].parse::<f64>().ok()?;
+                Some(EdgeServer {
+                    id: parts[0].trim().to_string(),
+                    url: parts[1].trim().trim_end_matches('/').to_string(),
+                    location: Location {
+                        latitude: lat,
+                        longitude: lon,
+                    },
+                })
+            })
+            .collect();
+
+        if !edges.is_empty() {
+            return edges;
+        }
+        warn!("EDGE_SERVERS was set but contained no valid entries; falling back");
+    }
+
+    if let Ok(raw) = std::env::var("CLOUDFRONT_DOMAIN") {
+        let url = raw.trim().trim_end_matches('/').to_string();
+        if !url.is_empty() {
+            return vec![EdgeServer {
+                id: "cloudfront".to_string(),
+                url,
+                location: Location {
+                    latitude: 0.0,
+                    longitude: 0.0,
+                },
+            }];
+        }
+    }
 
     vec![EdgeServer {
-        id: "cloudfront".to_string(),
-        url: raw,
+        id: "edge-local".to_string(),
+        url: "http://edge:8090".to_string(),
         location: Location {
             latitude: 0.0,
-            longitude: 0.0
+            longitude: 0.0,
         },
     }]
-    // if raw.is_empty() {
-    //     return vec![EdgeServer {
-    //         id: "edge-local".to_string(),
-    //         url: "http://localhost:8090".to_string(),
-    //         location: Location {
-    //             latitude: 0.0,
-    //             longitude: 0.0,
-    //         },
-    //     }];
-    // }
-
-    // raw.split(';')
-    //     .filter_map(|entry| {
-    //         let parts: Vec<&str> = entry.split(',').collect();
-    //         if parts.len() != 4 {
-    //             warn!("Skipping malformed edge entry: {}", entry);
-    //             return None;
-    //         }
-    //         let lat = parts[2].parse::<f64>().ok()?;
-    //         let lon = parts[3].parse::<f64>().ok()?;
-    //         Some(EdgeServer {
-    //             id: parts[0].to_string(),
-    //             url: parts[1].to_string(),
-    //             location: Location {
-    //                 latitude: lat,
-    //                 longitude: lon,
-    //             },
-    //         })
-    //     })
-    //     .collect()
 }
 
 /// Looks up the geographic location of an IP address using the GeoLite2 database.

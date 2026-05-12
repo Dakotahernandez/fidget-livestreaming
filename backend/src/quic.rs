@@ -1,16 +1,45 @@
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
-use crate::middleware::auth::Claims;
+use crate::middleware::auth::{decode_chat_access_token, Claims};
 use crate::models::stream;
 use crate::quic_chat;
 
 //Read buffer for the unidirectional ingest stream. Sized to swallow one
 //MediaRecorder timeslice (~100 ms of VP8/Opus) without thrashing read().
 const STREAM_READ_BUF: usize = 64 * 1024;
+
+/// How often the QUIC self-signed identity is regenerated. Chrome's
+/// WebTransport spec rejects `serverCertificateHashes` certificates whose
+/// validity period exceeds 14 days, AND of course rejects expired ones,
+/// so the previous "build once at startup" design silently broke browser
+/// ingest after two weeks of uptime (OBS / RTMP kept working, hence the
+/// long-running deploy bug). Rotating well under that ceiling keeps
+/// browser publishers reliably connected.
+const CERT_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24 * 10);
+
+/// Build a fresh self-signed identity for the WebTransport endpoint.
+fn build_identity() -> Identity {
+    Identity::self_signed(["localhost", "127.0.0.1", "::1"])
+        .expect("failed to create self-signed identity")
+}
+
+/// Compute the hex-encoded SHA-256 hash of the leaf certificate so the
+/// frontend can pin it via `serverCertificateHashes`.
+fn cert_hash_hex(identity: &Identity) -> String {
+    let leaf = identity
+        .certificate_chain()
+        .as_slice()
+        .first()
+        .expect("empty certificate chain");
+    hex::encode(leaf.hash().as_ref())
+}
 
 /// Start the QUIC/WebTransport ingest server and return its SHA-256 cert hash.
 pub fn start_quic_server(
@@ -19,38 +48,66 @@ pub fn start_quic_server(
     rtmp_url: String,
     pool: PgPool,
     chat_state: quic_chat::ChatState,
-) -> String {
-    //Self-signed identity.
-    let identity =
-        Identity::self_signed(["localhost", "127.0.0.1", "::1"]).expect("failed to create self-signed identity");
-
-    //Hash the leaf cert.
-    let leaf_cert = identity
-        .certificate_chain()
-        .as_slice()
-        .first()
-        .expect("empty certificate chain");
-    let digest = leaf_cert.hash();
-    let cert_hash_hex = hex::encode(digest.as_ref());
+) -> Arc<RwLock<String>> {
+    // Build the first identity synchronously so the HTTP server can serve
+    // a valid hash immediately, even before the rotation task runs.
+    let initial_identity = build_identity();
+    let initial_hash = cert_hash_hex(&initial_identity);
+    let cert_hash = Arc::new(RwLock::new(initial_hash.clone()));
 
     tracing::info!(
-        "QUIC ingest server starting on UDP port {port} (cert hash: {cert_hash_hex})"
+        "QUIC ingest server starting on UDP port {port} (cert hash: {initial_hash})"
     );
 
-    //3s keep-alive pings stop NATs and CGNAT firewalls from idling the QUIC
-    let config = ServerConfig::builder()
-        .with_bind_default(port)
-        .with_identity(identity)
-        .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
-        .build();
+    //3s keep-alive pings stop NATs and CGNAT firewalls from idling the QUIC connection.
+    let cert_hash_for_task = cert_hash.clone();
 
     //Hand off the accept loop to a background task and return so main() can
     //finish bringing up the HTTP router.
     tokio::spawn(async move {
-        run_quic_server(config, jwt_secret, rtmp_url, pool, chat_state).await;
+        let mut current_identity = initial_identity;
+        loop {
+            let config = ServerConfig::builder()
+                .with_bind_default(port)
+                .with_identity(current_identity)
+                .keep_alive_interval(Some(Duration::from_secs(3)))
+                .build();
+
+            // Race the accept loop against the rotation timer. When the
+            // timer fires `tokio::select!` drops the accept loop future,
+            // which drops the `Endpoint` and releases the UDP port so we
+            // can immediately rebind with a fresh identity. Active
+            // WebTransport sessions are torn down by this — a brief
+            // disruption every ~10 days is acceptable for the academic
+            // deployment.
+            tokio::select! {
+                _ = run_quic_server(
+                    config,
+                    jwt_secret.clone(),
+                    rtmp_url.clone(),
+                    pool.clone(),
+                    chat_state.clone(),
+                ) => {
+                    tracing::warn!(
+                        "QUIC accept loop exited unexpectedly; restarting in 5s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                _ = tokio::time::sleep(CERT_ROTATION_INTERVAL) => {
+                    tracing::info!("Rotating QUIC self-signed certificate");
+                }
+            }
+
+            current_identity = build_identity();
+            let new_hash = cert_hash_hex(&current_identity);
+            tracing::info!("New QUIC cert hash: {new_hash}");
+            *cert_hash_for_task
+                .write()
+                .expect("cert hash lock poisoned") = new_hash;
+        }
     });
 
-    cert_hash_hex
+    cert_hash
 }
 
 /// Accept loop - one task per WebTransport session.
@@ -91,13 +148,24 @@ async fn run_quic_server(
 
             //Chat sessions get routed off to quic_chat. Everything else falls through to video ingest.
             if let Some((stream_id, token)) = quic_chat::parse_chat_path(&path) {
-                let user_id = match validate_token(&token, &jwt_secret) {
-                    Some(id) => id,
-                    None => {
+                let chat_claims = match decode_chat_access_token(&token, &jwt_secret) {
+                    Ok(claims) => claims,
+                    Err(_) => {
                         tracing::warn!("Invalid chat token for stream {stream_id}");
                         return;
                     }
                 };
+
+                if chat_claims.stream_id != stream_id {
+                    tracing::warn!(
+                        "Rejected chat token with mismatched stream claim (claim={}, path={})",
+                        chat_claims.stream_id,
+                        stream_id
+                    );
+                    return;
+                }
+
+                let user_id = chat_claims.sub;
 
                 match stream::find_by_id(&pool, stream_id).await {
                     Ok(Some(_)) => {}
