@@ -509,6 +509,39 @@ function ScreenCapture({ streamId, streamKey }) {
       whipSessionRef.current = null;
     }
 
+    // Re-evaluate the broadcast video source based on the *current*
+    // webcam state. The composite stream built at startCapture() time
+    // was locked to whatever the webcam state was then, so toggling
+    // the webcam on between Start Capture and Go Live would otherwise
+    // ship the raw screen track (no PiP) to viewers. Swap the video
+    // track in place and keep the existing audio track(s) so the
+    // mixer / soundboard wiring is preserved.
+    const existing = compositeStreamRef.current;
+    if (existing) {
+      const screenTrack = screenStreamRef.current?.getVideoTracks?.()[0] || null;
+      const canvas = canvasRef.current;
+      const wantCanvas = webcamOnRef.current && canvas;
+      const currentVideo = existing.getVideoTracks()[0] || null;
+      // canvas-sourced tracks have label "" and a kind of "video"; the
+      // raw display track has a non-empty label like "screen:0:0".
+      const currentlyCanvas = currentVideo && currentVideo.label === '';
+      if (wantCanvas !== currentlyCanvas) {
+        const nextVideo = wantCanvas
+          ? canvas.captureStream(CANVAS_FPS).getVideoTracks()[0]
+          : screenTrack;
+        if (nextVideo) {
+          if (currentVideo) {
+            // Detach from the broadcast stream but DO NOT stop() —
+            // the raw screen track is shared with screenVideoRef and
+            // is the source the canvas draws from. Stopping it would
+            // freeze both the local preview and the canvas composite.
+            existing.removeTrack(currentVideo);
+          }
+          existing.addTrack(nextVideo);
+        }
+      }
+    }
+
     // WHIP fallback (Firefox / Safari). Hand the composite media stream
     // to SRS via standard WebRTC SRS bridges it into the same RTMP ->
     // HLS pipeline that the WebTransport path feeds, so viewers see the
