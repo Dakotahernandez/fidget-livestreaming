@@ -98,28 +98,45 @@ export const listUsers = () =>
 export const updateUserRole = (id, role) =>
   api.patch(`/admin/users/${id}/role`, { role });
 
+export const listPendingRoleApplications = () =>
+  api.get('/admin/role-applications');
+
+export const reviewRoleApplication = (id, action) =>
+  api.patch(`/admin/role-applications/${id}`, { action });
+
+
+// ── Role application endpoints ──────────────────────────────────────
+export const submitRoleApplication = (reason = '', targetRole = 'streamer') =>
+  api.post('/role-applications', {
+    reason,
+    target_role: targetRole,
+  });
+
+export const listMyRoleApplications = () =>
+  api.get('/role-applications');
+
 
 // ── Chat endpoints ───────────────────────────────────────────────────
-export const listChatMessages = (streamId) =>
-  api.get(`/chat/streams/${streamId}/messages`);
+export const listChatMessages = (streamId, chatToken) =>
+  api.get(`/chat/streams/${streamId}/messages`, {
+    params: { chat_token: chatToken },
+  });
 
-export const getChatTransportUrl = (streamId) => {
-  const token = getStoredToken();
+export const getChatTransportUrl = (streamId, chatToken) => {
+  if (!chatToken) return null;
   const host = window.location.hostname;
   const quicPort = 4443;
-  return `https://${host}:${quicPort}/chat/${streamId}?token=${token}`;
+  return `https://${host}:${quicPort}/chat/${streamId}?chat_token=${encodeURIComponent(chatToken)}`;
 };
 
 // WebSocket fallback for browsers without WebTransport (Firefox, Safari).
 // Same-origin upgrade through the frontend nginx so it inherits the page's
-// HTTPS and avoids cross-origin restrictions.
-export const getChatWebSocketUrl = (streamId) => {
-  const token = getStoredToken();
-  if (!token) {
-    return null;
-  }
+// HTTPS and avoids cross-origin restrictions. Uses the stream-scoped chat
+// token (same one used by the WebTransport path).
+export const getChatWebSocketUrl = (streamId, chatToken) => {
+  if (!chatToken) return null;
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${window.location.host}/api/chat/streams/${streamId}/ws?token=${encodeURIComponent(token)}`;
+  return `${scheme}//${window.location.host}/api/chat/streams/${streamId}/ws?chat_token=${encodeURIComponent(chatToken)}`;
 };
 
 

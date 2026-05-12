@@ -4,8 +4,10 @@ import useAuth from '../hooks/useAuth';
 import {
   createStream,
   deleteStream,
+  listMyRoleApplications,
   listMyStreams,
   listStreams,
+  submitRoleApplication,
 } from '../services/api';
 import ScreenCapture from '../components/streamer/ScreenCapture';
 
@@ -34,6 +36,11 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showKey, setShowKey] = useState({});
+  const [applicationReason, setApplicationReason] = useState('');
+  const [requestedRole, setRequestedRole] = useState('streamer');
+  const [myRoleApplications, setMyRoleApplications] = useState([]);
+  const [applicationError, setApplicationError] = useState('');
+  const [applying, setApplying] = useState(false);
 
   // Stream ids the user just created in this browser session. We keep them
   // visible (so the broadcast panel stays mounted before Go Live) even
@@ -49,6 +56,8 @@ function Dashboard() {
   const firstOfflineAtRef = useRef(new Map());
 
   const canStream = user?.role === 'admin' || user?.role === 'streamer';
+  const latestRoleApplication = myRoleApplications[0];
+  const hasPendingRoleApplication = latestRoleApplication?.status === 'pending';
 
   // Redirect to login if not authenticated.
   useEffect(() => {
@@ -154,6 +163,38 @@ function Dashboard() {
     };
   }, [isAuthenticated]);
 
+  useEffect(() => {
+    if (!isAuthenticated || user?.role !== 'viewer') {
+      setMyRoleApplications([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const fetchMyApplications = async () => {
+      try {
+        const res = await listMyRoleApplications();
+        if (!cancelled) {
+          setMyRoleApplications(res.data || []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setApplicationError(
+            err.response?.data?.error ||
+            err.response?.data?.message ||
+            'Could not load role applications.',
+          );
+        }
+      }
+    };
+
+    fetchMyApplications();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, user?.role]);
+
   const handleCreate = async (e) => {
     e.preventDefault();
     setError('');
@@ -172,6 +213,26 @@ function Dashboard() {
   const toggleShowKey = (id) =>
     setShowKey((prev) => ({ ...prev, [id]: !prev[id] }));
 
+  const handleApplyForStreamer = async (e) => {
+    e.preventDefault();
+    setApplicationError('');
+    setApplying(true);
+
+    try {
+      const res = await submitRoleApplication(applicationReason, requestedRole);
+      setMyRoleApplications((current) => [res.data, ...current]);
+      setApplicationReason('');
+    } catch (err) {
+      setApplicationError(
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        'Could not submit role application.',
+      );
+    } finally {
+      setApplying(false);
+    }
+  };
+
   if (!isAuthenticated) return null;
 
   return (
@@ -182,9 +243,80 @@ function Dashboard() {
 
 
       {user?.role === 'viewer' && (
-        <p className="mt-1" style={{ color: 'var(--color-text-muted)' }}>
-          You are signed in as a viewer. You can watch live streams, but you cannot create streams.
-        </p>
+        <>
+          <p className="mt-1" style={{ color: 'var(--color-text-muted)' }}>
+            You are signed in as a viewer. You can watch live streams, but you cannot create streams.
+          </p>
+
+          <div className="dashboard-section mt-2">
+            <h3>Apply to Become a Streamer</h3>
+
+            <p className="mt-1" style={{ color: 'var(--color-text-muted)' }}>
+              Submit a request and an admin can approve your requested role.
+            </p>
+
+            <form onSubmit={handleApplyForStreamer} style={{ marginTop: '0.75rem' }}>
+              <div style={{ marginBottom: '0.5rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                    Requested role:
+                  </span>
+                  <select
+                    value={requestedRole}
+                    onChange={(e) => setRequestedRole(e.target.value)}
+                    disabled={applying || hasPendingRoleApplication}
+                    style={{
+                      padding: '0.35rem 0.5rem',
+                      borderRadius: 'var(--radius)',
+                      border: '1px solid var(--color-border)',
+                      background: 'var(--color-bg)',
+                      color: 'var(--color-text)',
+                    }}
+                  >
+                    <option value="streamer">streamer</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </label>
+              </div>
+
+              <textarea
+                value={applicationReason}
+                onChange={(e) => setApplicationReason(e.target.value)}
+                placeholder="Why should this role be approved?"
+                rows={3}
+                disabled={applying || hasPendingRoleApplication}
+                style={{
+                  width: '100%',
+                  padding: '0.5rem 0.75rem',
+                  background: 'var(--color-bg)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius)',
+                  color: 'var(--color-text)',
+                }}
+              />
+
+              <div className="mt-1" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <button
+                  className="btn"
+                  type="submit"
+                  disabled={applying || hasPendingRoleApplication}
+                >
+                  {applying ? 'Submitting...' : hasPendingRoleApplication ? 'Request Pending' : 'Submit Request'}
+                </button>
+
+                {latestRoleApplication && (
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                    Latest request status: {latestRoleApplication.status} ({latestRoleApplication.target_role})
+                  </span>
+                )}
+              </div>
+            </form>
+
+            {applicationError && (
+              <p className="error-msg mt-1">{applicationError}</p>
+            )}
+          </div>
+        </>
       )}
 
       {canStream &&(
