@@ -544,37 +544,17 @@ client picks one of two transports depending on browser capability:
 
 ```mermaid
 flowchart LR
-    subgraph CHROMIUM["Chromium browsers"]
-        CC["StreamChat.jsx<br/>connectViaWebTransport()"]
-    end
+    CHROME["Chromium browser"] -->|"WebTransport"| BUS(("Broadcast bus"))
+    OTHER["Firefox / Safari"] -->|"WebSocket"| BUS
+    BUS -->|"fan-out"| CHROME
+    BUS -->|"fan-out"| OTHER
+    BUS --> DB[("Chat history")]
 
-    subgraph OTHERS["Firefox &amp; Safari (and any WT failure)"]
-        WC["StreamChat.jsx<br/>connectViaWebSocket()"]
-    end
-
-    subgraph BACKEND["Backend"]
-        QC["QUIC chat handler<br/>:4443/udp"]
-        WSH["WebSocket handler<br/>/api/chat/streams/:id/ws"]
-        BUS["Per-stream broadcast bus<br/>(tokio::sync::broadcast)"]
-        DB[("PostgreSQL<br/>chat_messages")]
-    end
-
-    CC == "WebTransport bidi stream<br/>(chat_access_token)" ==> QC
-    WC == "WebSocket frames<br/>(?token=...)" ==> WSH
-    QC --> BUS
-    WSH --> BUS
-    BUS -. "fan-out" .-> CC
-    BUS -. "fan-out" .-> WC
-    BUS -- "persist" --> DB
-
-    classDef chromium fill:#bfdbfe,stroke:#1d4ed8,color:#1f2937;
-    classDef other    fill:#fde68a,stroke:#b45309,color:#1f2937;
-    classDef backend  fill:#ddd6fe,stroke:#6d28d9,color:#1f2937;
-    classDef store    fill:#e5e7eb,stroke:#374151,color:#1f2937;
-
-    class CC chromium;
-    class WC other;
-    class QC,WSH,BUS backend;
+    classDef client fill:#fde68a,stroke:#b45309,color:#1f2937;
+    classDef step   fill:#ddd6fe,stroke:#6d28d9,color:#1f2937;
+    classDef store  fill:#fecaca,stroke:#b91c1c,color:#1f2937;
+    class CHROME,OTHER client;
+    class BUS step;
     class DB store;
 ```
 
