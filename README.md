@@ -110,10 +110,15 @@ Pick a tried and tested architecture that's known to scale before starting, inst
 
 ### Ben
 - What novel work did you do?
+- 	Streamer keys and FFMPeg qualities. Google Slides. Doccumentation.
 - What did you learn?
+- 	I learned that FFMPeg is extremly useful for parsing video and audio files. It made it very easy to convert our data to whatever format we needed it for. I also learned that it can be vvery hard to debug the applicatipn layer tools that we used/trying to use. We ened up changning tools multiple times because we were not able to find the bugs in what we had. We also tried to have fallbacks for most of our tools incase the main branch failed.
 - What was challenging?
+- 	The hardest part was figuring out what tools to use. We did not spend enough time reseaching so we refactored our project many times which eventaully required us to restructure it. 
 - What AI tools did you use, and what did you use them for? What were their benefits and drawbacks?
+- 	I used claude to generate diagrams and to give me commands to test my code.
 - What would you do differently next time?
+- 	More preperation, try to figure out how all aspects of the architecture work before developing. The big picture was very overwhelming at the beginning so just started developing small fragments but they did not come together well.
 
 ## What to submit
 - Push your working code to the main branch of your team's GitHub Repository before the deadline
