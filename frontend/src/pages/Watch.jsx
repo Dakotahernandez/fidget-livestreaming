@@ -14,6 +14,7 @@ const QUALITY_OPTIONS = [
   { value: '1080p', label: '1080p' },
   { value: '720p',  label: '720p' },
   { value: '360p',  label: '360p' },
+  {value: '4k',     label: 'OBS stream' },
 ];
 const DEFAULT_QUALITY = '1080p';
 
@@ -174,19 +175,24 @@ function Watch() {
   // Derived playback identifiers that fold the user's quality choice into
   // the URL/stream-key. The player effect keys on these so changing the
   // dropdown tears down the current WHEP/HLS player and starts a fresh
-  // one against the new rendition. Every rendition in the ladder is a
-  // suffixed publish (no untouched source passthrough), so the suffix is
-  // always appended when a stream key is present.
+  // one against the new rendition.
   const playbackKey = useMemo(
-    () => (streamKey ? `${streamKey}_${quality}` : streamKey),
+    () => {
+      if (!streamKey) return streamKey;
+      return quality === '4k' ? streamKey : `${streamKey}_${quality}`;
+    },
     [streamKey, quality],
   );
+
   const playbackUrl = useMemo(() => {
     if (!hlsUrl || !streamKey) return hlsUrl;
+
+    const nextKey = quality === '4k' ? streamKey : `${streamKey}_${quality}`;
+
     // Both origin and edge-routed URLs end in `…/hls/<streamKey>/index.m3u8`,
     // so it's safe to swap just the key segment without re-running the
     // route lookup.
-    return hlsUrl.replace(`/${streamKey}/`, `/${streamKey}_${quality}/`);
+    return hlsUrl.replace(`/${streamKey}/`, `/${nextKey}/`);
   }, [hlsUrl, streamKey, quality]);
 
   const updatePlaybackMetrics = useCallback((partial) => {
