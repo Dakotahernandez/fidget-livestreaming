@@ -96,10 +96,16 @@ Pick a tried and tested architecture that's known to scale before starting, inst
 
 ### Josh
 - What novel work did you do?
+-  	I worked mainly on the chat feature using webtransport. I also initially worked on the edge server for HLS delivery. We ended up not using the edge server and took a different approach.
 - What did you learn?
+- 	I learned more about WebTransport , but the support varies by browser. Having a WebSocket is useful to ensure the chat works. I also learned about how the stream system works. The browser sends the video using WHIP/WebRTC and the backend processes the stream with SRS and ffmpeg. The stream can then be transcoded into different qualities so that viewers can adjust their quality. The processed video is packaged as HLS and can be sent over http. The files are delivered through CloudFront CDN and the viewer’s browser requests the video segments. 
+- What did you learn?
+- 	It was challenging to know what tools to use and how it should all be connected. It was also challenging to make sure the chat feature is reliable while still using WebTransport.
 - What was challenging?
+- 	I used chatgpt to help create the UI, particularly the admin page to change the roles of users. It helped make the page quicker and made me worry less about the UI.
 - What AI tools did you use, and what did you use them for? What were their benefits and drawbacks?
 - What would you do differently next time?
+- 	Next time I would try to understand and confirm the final architecture early. Working on the edge server helped me understand how the streaming delivery works but we ended up moving away from that approach. 
 
 ### Chandler
 - What novel work did you do?
