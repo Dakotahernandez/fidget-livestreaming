@@ -6,6 +6,8 @@ import {
 	listChatMessages,
 } from '../../services/api';
 
+const MAX_VISIBLE_MESSAGES = 24;
+
 function hexToBytes(hex) {
 	const bytes = new Uint8Array(hex.length / 2);
 
@@ -16,26 +18,33 @@ function hexToBytes(hex) {
 	return bytes;
 }
 
-function StreamChat({ streamId }) {
+function StreamChat({ streamId, chatToken }) {
 	const [messages, setMessages] = useState([]);
 	const [input, setInput] = useState('');
 	const [connected, setConnected] = useState(false);
 	const [error, setError] = useState('');
 
 	const writerRef = useRef(null);
-	const messagesEndRef = useRef(null);
-	const chatBoxRef = useRef(null);
-	const shouldAutoScrollRef = useRef(true);
 
 	useEffect(() => {
 	    let cancelled = false;
 
+		if (!chatToken) {
+			setMessages([]);
+			setConnected(false);
+			setError('Sign in and join the stream to use chat.');
+			return () => {
+				cancelled = true;
+			};
+		}
+
 		const loadMessages = async () => {
 		    try {
-		    	const res = await listChatMessages(streamId);
+		    	const res = await listChatMessages(streamId, chatToken);
 
 				if (!cancelled) {
-					setMessages(res.data || []);
+					setMessages((res.data || []).slice(-MAX_VISIBLE_MESSAGES));
+					setError('');
 				}
 			} catch {
 				if (!cancelled) {
@@ -49,13 +58,14 @@ function StreamChat({ streamId }) {
 		return () => {
 			cancelled = true;
 		};
-	}, [streamId]);
+	}, [streamId, chatToken]);
 
 	useEffect(() => {
 		let cancelled = false;
 		let cleanup = () => {};
 
-		// Append/dedupe a parsed message into local state.
+		// Append/dedupe a parsed message into local state, capped to the
+		// most recent MAX_VISIBLE_MESSAGES so the chat box stays bounded.
 		const handleIncoming = (message) => {
 			setMessages((current) => {
 				const alreadyExists = current.some((m) => m.id === message.id);
@@ -64,7 +74,7 @@ function StreamChat({ streamId }) {
 					return current;
 				}
 
-				return [...current, message];
+				return [...current, message].slice(-MAX_VISIBLE_MESSAGES);
 			});
 		};
 
@@ -103,10 +113,10 @@ function StreamChat({ streamId }) {
 		};
 
 		const connectViaWebTransport = async () => {
-			const url = getChatTransportUrl(streamId);
+			const url = getChatTransportUrl(streamId, chatToken);
 
 			if (!url) {
-				throw new Error('not signed in');
+				throw new Error('missing chat token');
 			}
 
 			const certRes = await getCertHash();
@@ -169,10 +179,10 @@ function StreamChat({ streamId }) {
 		};
 
 		const connectViaWebSocket = () => new Promise((resolve, reject) => {
-			const url = getChatWebSocketUrl(streamId);
+			const url = getChatWebSocketUrl(streamId, chatToken);
 
 			if (!url) {
-				reject(new Error('not signed in'));
+				reject(new Error('missing chat token'));
 				return;
 			}
 
@@ -239,6 +249,11 @@ function StreamChat({ streamId }) {
 				setError('');
 				setConnected(false);
 
+				if (!chatToken) {
+					setError('Sign in and join the stream to use chat.');
+					return;
+				}
+
 				if (window.WebTransport) {
 					try {
 						await connectViaWebTransport();
@@ -269,26 +284,7 @@ function StreamChat({ streamId }) {
 			setConnected(false);
 			cleanup();
 		};
-	}, [streamId]);
-
-	useEffect(() => {
-		if (shouldAutoScrollRef.current) {
-			messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-		}
-	}, [messages]);
-
-	const handleChatScroll = () => {
-		const chatBox = chatBoxRef.current;
-
-		if (!chatBox) {
-			return;
-		}
-
-		const distanceFromBottom =
-			chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight;
-
-		shouldAutoScrollRef.current = distanceFromBottom < 80;
-	};
+	}, [streamId, chatToken]);
 
 	const sendMessage = async (e) => {
 		e.preventDefault();
@@ -316,79 +312,37 @@ function StreamChat({ streamId }) {
 		}
 	};
 
-	const statusText = connected ? 'Connected' : error ? 'Disconnected' : 'Connecting...';
+	const statusText = !chatToken
+		? 'Join while signed in'
+		: connected
+			? 'Live'
+			: error
+				? 'Disconnected'
+				: 'Connecting';
 
 	return (
-		<div className="dashboard-section mt-2">
-			<h3>Chat</h3>
+		<div className="stream-chat-panel">
+			<div className="stream-chat-panel__header">
+				<h3>Chat</h3>
+				<span className="stream-chat-panel__status">{statusText}</span>
+			</div>
 
-			<p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
-				Status: {statusText}
-			</p>
+			{error && <p className="stream-chat-panel__error">{error}</p>}
 
-			{error && <p className="error-msg mt-1">{error}</p>}
-
-			<div
-				ref={chatBoxRef}
-				onScroll={handleChatScroll}
-				style={{
-					border: '1px solid var(--color-border)',
-					borderRadius: 'var(--radius)',
-					padding: '0.75rem',
-					marginTop: '0.75rem',
-					minHeight: '180px',
-					maxHeight: '280px',
-					overflowY: 'auto',
-					overflowX: 'hidden',
-					background: 'var(--color-bg)',
-					minWidth: 0,
-					maxWidth: '100%',
-				}}
-			>
+			<div className="stream-chat-panel__messages" aria-live="polite" aria-relevant="additions text">
 				{messages.length === 0 ? (
-					<p style={{ color: 'var(--color-text-muted)' }}>
-						No messages yet.
-					</p>
+					<p className="stream-chat-panel__placeholder">No messages yet.</p>
 				) : (
 					messages.map((msg) => (
-						<div
-							key={msg.id}
-							style={{
-								marginBottom: '0.5rem',
-								maxWidth: '100%',
-								minWidth: 0,
-								overflowWrap: 'anywhere',
-								wordBreak: 'break-word',
-								whiteSpace: 'normal',
-							}}
-						>
+						<div key={msg.id} className="stream-chat-panel__message">
 							<strong>{msg.username || 'User'}:</strong>{' '}
-							<span
-								style={{
-									overflowWrap: 'anywhere',
-									wordBreak: 'break-word',
-									whiteSpace: 'normal',
-								}}
-							>
-								{msg.message}
-							</span>
+							<span>{msg.message}</span>
 						</div>
 					))
 				)}
-
-				<div ref={messagesEndRef} />
 			</div>
 
-			<form
-				onSubmit={sendMessage}
-				style={{
-					display: 'flex',
-					gap: '0.5rem',
-					marginTop: '0.75rem',
-					minWidth: 0,
-					maxWidth: '100%',
-				}}
-			>
+			<form className="stream-chat-panel__composer" onSubmit={sendMessage}>
 				<input
 					type="text"
 					placeholder="Send a message..."
@@ -396,15 +350,6 @@ function StreamChat({ streamId }) {
 					onChange={(e) => setInput(e.target.value)}
 					maxLength={500}
 					disabled={!connected}
-					style={{
-						flex: 1,
-						minWidth: 0,
-						padding: '0.5rem 0.75rem',
-						background: 'var(--color-bg)',
-						border: '1px solid var(--color-border)',
-						borderRadius: 'var(--radius)',
-						color: 'var(--color-text)',
-					}}
 				/>
 
 				<button className="btn" type="submit" disabled={!connected}>

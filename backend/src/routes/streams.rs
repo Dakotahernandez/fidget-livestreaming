@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     middleware as axum_mw,
     routing::{delete, get, post, put},
     Extension, Json, Router,
@@ -11,9 +12,15 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::errors::AppError;
-use crate::middleware::auth::{require_auth, AuthUser};
+use crate::middleware::auth::{
+    create_chat_access_token,
+    extract_optional_auth_user,
+    require_auth,
+    AuthUser,
+    CHAT_TOKEN_EXPIRY_SECS,
+};
 use crate::models::stream::{self, CreateStream};
-use crate::models:: user;
+use crate::models::user;
 
 /// Builds the /api/streams/* sub-router.
 /// Public: list live, get details, join. Protected: create, list-mine, start,
@@ -126,6 +133,7 @@ async fn get_stream(
 /// POST /api/streams/:id/join - verify access and return the HLS URL.
 async fn join_stream(
     State((pool, config)): State<(PgPool, Config)>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<JoinStreamRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -149,14 +157,36 @@ async fn join_stream(
         }
     }
 
+    // When CLOUDFRONT_DOMAIN is set we hand viewers an absolute URL at
+    // the configured CDN edge; otherwise we hand them a relative URL
+    // that the frontend nginx proxies same-origin to the in-cluster
+    // media-server (the local docker-compose dev path).
     let cloudfront_url = config.cloudfront_url.trim_end_matches('/');
+    let hls_url = if cloudfront_url.is_empty() {
+        format!("/hls/{}/index.m3u8", s.stream_key)
+    } else {
+        format!("{}/hls/{}/index.m3u8", cloudfront_url, s.stream_key)
+    };
+
+    let maybe_auth_user = extract_optional_auth_user(&headers, &config.jwt_secret)?;
+    let chat_access_token = if let Some(auth_user) = maybe_auth_user {
+        Some(create_chat_access_token(
+            auth_user.user_id,
+            s.id,
+            &config.jwt_secret,
+        )?)
+    } else {
+        None
+    };
 
     Ok(Json(serde_json::json!({
         "id": s.id,
         "title": s.title,
         "is_live": s.is_live,
         "stream_key": s.stream_key,
-        "hls_url": format!("{}/{}/index.m3u8", cloudfront_url ,s.stream_key),
+        "hls_url": hls_url,
+        "chat_access_token": chat_access_token,
+        "chat_access_expires_in_secs": CHAT_TOKEN_EXPIRY_SECS,
     })))
 }
 

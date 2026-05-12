@@ -19,7 +19,7 @@ impl std::fmt::Display for AppError {
         match self {
             Self::NotFound(msg) => write!(f, "Not found: {msg}"),
             Self::Unauthorized(msg) => write!(f, "Unauthorized: {msg}"),
-            Self:: Forbidden(msg) => write!(f, "Unauthorized: {msg}"),
+            Self::Forbidden(msg) => write!(f, "Forbidden: {msg}"),
             Self::BadRequest(msg) => write!(f, "Bad request: {msg}"),
             Self::Internal(msg) => write!(f, "Internal error: {msg}"),
         }
