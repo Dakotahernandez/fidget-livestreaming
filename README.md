@@ -109,10 +109,15 @@ Pick a tried and tested architecture that's known to scale before starting, inst
 
 ### Chandler
 - What novel work did you do?
+- I worked on the cloud deployment, OBS -> HLS -> Fidgetlive.com and the DNS resolving for streaming and accessing the webfront. I also worked on CDN deployment and traffic pushing.
 - What did you learn?
+- I learned about geolocation DNS routing and how distributed servers push traffic to a centeral place for display.
 - What was challenging?
+- It was a challenge to learn how to use RTMP and HLS for the servers. Half the time it would break when I changed one small thing. It was also really hard to figure out security groups for accessing the servers from DNS
 - What AI tools did you use, and what did you use them for? What were their benefits and drawbacks?
+- I used Gemini for getting the servers up for HLS and help with AWS. I also read the AWS docs heavily for getting the deployment setup.
 - What would you do differently next time?
+- I would deploy more frontend servers for anycast to allow users from anywhere to access the site with low latency and watch the streams. The streams are watchable from just about anywhere via the CDN link, but struggle on the webfront.
 
 ### Ben
 - What novel work did you do?
